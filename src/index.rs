@@ -27,6 +27,7 @@ pub struct IndexStats {
 }
 
 pub const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+const INDEX_FORMAT_VERSION: u64 = 2;
 
 struct ParsedFile {
     path: String,
@@ -112,6 +113,11 @@ pub fn rebuild(config: &Config) -> Result<IndexStats> {
     let started = Instant::now();
     let repositories = discover_repositories(&config.root)?;
     let mut connection = open_database(&config.index_path)?;
+    if index_format_version(&connection)? != Some(INDEX_FORMAT_VERSION) {
+        // Schema-derived fields may need data that cannot be reconstructed by
+        // ALTER TABLE. Invalidate blob IDs so every file is parsed once.
+        connection.execute("UPDATE files SET blob_id = ''", [])?;
+    }
     let mut stats = IndexStats {
         repositories: repositories.len(),
         ..IndexStats::default()
@@ -139,7 +145,23 @@ fn record_index_completion(connection: &Connection) -> Result<()> {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         [completed_at],
     )?;
+    connection.execute(
+        "INSERT INTO index_metadata(key, value) VALUES ('format_version', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [INDEX_FORMAT_VERSION],
+    )?;
     Ok(())
+}
+
+fn index_format_version(connection: &Connection) -> Result<Option<u64>> {
+    connection
+        .query_row(
+            "SELECT value FROM index_metadata WHERE key = 'format_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
 }
 
 pub fn index_is_stale(connection: &Connection) -> Result<bool> {
@@ -344,7 +366,10 @@ pub fn index_exists(path: &Path) -> Result<bool> {
         )
         .optional()?
         .is_some();
-    Ok(completed)
+    if !completed {
+        return Ok(false);
+    }
+    Ok(index_format_version(&connection)? == Some(INDEX_FORMAT_VERSION))
 }
 
 #[cfg(test)]
@@ -423,6 +448,14 @@ mod tests {
         record_index_completion(&connection).unwrap();
         assert!(!index_is_stale(&connection).unwrap());
         assert!(index_exists(&temporary.path().join("index.sqlite3")).unwrap());
+
+        connection
+            .execute(
+                "DELETE FROM index_metadata WHERE key = 'format_version'",
+                [],
+            )
+            .unwrap();
+        assert!(!index_exists(&temporary.path().join("index.sqlite3")).unwrap());
 
         let stale_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)

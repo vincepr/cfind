@@ -90,6 +90,37 @@ fn reindexes_uncommitted_changes_to_tracked_files() {
     );
 }
 
+#[test]
+fn index_format_upgrade_reparses_unchanged_files() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    create_repository(
+        &workspace,
+        "Context.cs",
+        "namespace Acme.Data;\npublic class DatabaseContext {}\n",
+    );
+    let config = config(&workspace, SupportedLanguage::CSharp);
+    rebuild(&config).unwrap();
+
+    let database = open_database(&config.index_path).unwrap();
+    database
+        .execute("UPDATE symbols SET namespace = NULL", [])
+        .unwrap();
+    database
+        .execute(
+            "DELETE FROM index_metadata WHERE key = 'format_version'",
+            [],
+        )
+        .unwrap();
+    drop(database);
+
+    let stats = rebuild(&config).unwrap();
+    assert_eq!(stats.parsed_files, 1);
+    let database = open_database(&config.index_path).unwrap();
+    let results = search(&database, "DatabaseContext", &workspace, 10).unwrap();
+    assert_eq!(results[0].namespace.as_deref(), Some("Acme.Data"));
+}
+
 fn config(root: &Path, language: SupportedLanguage) -> Config {
     Config {
         root: root.to_path_buf(),
