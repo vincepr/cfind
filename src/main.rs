@@ -5,14 +5,14 @@ use clap::Parser;
 use code_search::{
     config::Config,
     index::{index_exists, index_is_stale, open_database, rebuild},
-    search::{canonical_search_origin, require_query, search_filtered},
+    search::{canonical_search_origin, distinct_symbol_kinds, require_query, search_filtered},
 };
 
 #[derive(Debug, Parser)]
 #[command(
     version,
     about = "Local code symbol search",
-    after_help = "Examples:\n  code-search DatabaseContext\n  code-search GzipDecompress -f '\\.cs$'\n  code-search --index\n  code-search --status\n\nEnvironment:\n  CODE_SEARCH_ROOT=/path/to/code                         Required repository directory\n  CODE_SEARCH_INDEX=/path/to/index.sqlite                Optional exact database path\n  CODE_SEARCH_LANGUAGES=rust,javascript,typescript,csharp Optional languages (default: all)"
+    after_help = "Examples:\n  code-search DatabaseContext\n  code-search GzipDecompress -f '\\.cs$'\n  code-search --type\n  code-search --index\n  code-search --status\n\nEnvironment:\n  CODE_SEARCH_ROOT=/path/to/code                         Required repository directory\n  CODE_SEARCH_INDEX=/path/to/index.sqlite                Optional exact database path\n  CODE_SEARCH_LANGUAGES=rust,javascript,typescript,csharp Optional languages (default: all)"
 )]
 struct Cli {
     /// Symbol name (fuzzy matching supported).
@@ -32,12 +32,18 @@ struct Cli {
     /// Path regex (e.g. '\.cs$' or '\.(cs|rs)$').
     #[arg(short, long, value_name = "REGEX")]
     filter: Option<String>,
+    /// Filter symbol kind; omit TYPE to list indexed kinds.
+    #[arg(short = 't', long = "type", value_name = "TYPE", num_args = 0..=1, default_missing_value = "")]
+    symbol_type: Option<String>,
     /// Prefer commit-pinned URLs; fall back to branch URLs.
     #[arg(long)]
     commit_url: bool,
     /// Omit repository URLs.
     #[arg(short, long)]
     quiet: bool,
+    /// Include containing namespaces.
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 fn main() {
@@ -57,10 +63,10 @@ fn run() -> Result<()> {
         return run_status(&config);
     }
 
-    let Some(query) = cli.query else {
-        bail!("query required (or use --index/--status); try `code-search --help`");
-    };
-    require_query(&query)?;
+    let list_types = cli.symbol_type.as_deref() == Some("");
+    if cli.query.is_none() && !list_types {
+        bail!("query required (or use --type to list indexed kinds)");
+    }
     if cli.index {
         rebuild(&config)?;
     } else if !index_exists(&config.index_path)? {
@@ -68,18 +74,49 @@ fn run() -> Result<()> {
         eprintln!("Creating SQLite index at {}.", config.index_path.display());
         run_index(&config)?;
     }
+    let connection = open_database(&config.index_path)?;
+    let kinds = distinct_symbol_kinds(&connection)?;
+    if list_types {
+        for kind in kinds {
+            println!("{kind}");
+        }
+        return Ok(());
+    }
+
+    let Some(query) = cli.query else {
+        bail!("query required (or use --type to list indexed kinds)");
+    };
+    require_query(&query)?;
+    let symbol_type = cli
+        .symbol_type
+        .as_deref()
+        .map(|kind| kind.trim().to_ascii_lowercase());
+    if let Some(kind) = symbol_type.as_deref()
+        && !kinds.iter().any(|available| available == kind)
+    {
+        bail!(
+            "unknown type '{kind}'; available types: {}",
+            kinds.join(", ")
+        );
+    }
     let from = canonical_search_origin(
         &cli.from
             .unwrap_or(env::current_dir().context("could not determine current directory")?),
     )?;
-    let connection = open_database(&config.index_path)?;
     if index_is_stale(&connection)? {
         eprintln!(
             "warning: the code-search index is more than one day old; re-index with: {}",
             reindex_command(&config)
         );
     }
-    let results = search_filtered(&connection, &query, &from, cli.limit, cli.filter.as_deref())?;
+    let results = search_filtered(
+        &connection,
+        &query,
+        &from,
+        cli.limit,
+        cli.filter.as_deref(),
+        symbol_type.as_deref(),
+    )?;
     for result in results {
         let parent = result
             .parent
@@ -95,6 +132,11 @@ fn run() -> Result<()> {
             result.local_path.display(),
             result.start_line
         );
+        if cli.verbose
+            && let Some(namespace) = result.namespace.as_deref()
+        {
+            println!("  namespace {namespace}");
+        }
         let url = if cli.quiet {
             None
         } else if cli.commit_url {

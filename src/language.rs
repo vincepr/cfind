@@ -39,7 +39,7 @@ fn parse_source_with_dialect(
         .parse(source, None)
         .context("Tree-sitter did not produce a syntax tree")?;
     let mut symbols = Vec::new();
-    collect_symbols(tree.root_node(), source, language, None, &mut symbols);
+    collect_symbols(tree.root_node(), source, language, None, None, &mut symbols);
     Ok(symbols)
 }
 
@@ -48,6 +48,7 @@ fn collect_symbols(
     source: &[u8],
     language: SupportedLanguage,
     parent: Option<&str>,
+    namespace: Option<&str>,
     symbols: &mut Vec<Symbol>,
 ) {
     let definition = symbol_kind(node, language).and_then(|kind| {
@@ -59,26 +60,72 @@ fn collect_symbols(
         Some((kind, name))
     });
 
-    let next_parent = if let Some((kind, name)) = definition {
+    let mut next_parent = parent.map(str::to_owned);
+    let mut next_namespace = namespace.map(str::to_owned);
+    if let Some((kind, name)) = definition {
         let start = node.start_position();
         let end = node.end_position();
+        let is_namespace = kind == "namespace";
+        let indexed_name = if is_namespace {
+            qualify_namespace(namespace, &name)
+        } else {
+            name.clone()
+        };
         symbols.push(Symbol {
-            name: name.clone(),
+            name: indexed_name.clone(),
             kind: kind.to_owned(),
+            namespace: if is_namespace {
+                None
+            } else {
+                namespace.map(str::to_owned)
+            },
             start_line: start.row + 1,
             start_column: start.column + 1,
             end_line: end.row + 1,
             end_column: end.column + 1,
-            parent: parent.map(str::to_owned),
+            parent: if is_namespace {
+                None
+            } else {
+                parent.map(str::to_owned)
+            },
         });
-        Some(name)
-    } else {
-        parent.map(str::to_owned)
-    };
+        if is_namespace {
+            next_namespace = Some(indexed_name);
+        } else {
+            next_parent = Some(name);
+        }
+    }
 
     let mut cursor = node.walk();
+    let mut sibling_namespace = next_namespace.clone();
     for child in node.children(&mut cursor) {
-        collect_symbols(child, source, language, next_parent.as_deref(), symbols);
+        collect_symbols(
+            child,
+            source,
+            language,
+            next_parent.as_deref(),
+            sibling_namespace.as_deref(),
+            symbols,
+        );
+        if language == SupportedLanguage::CSharp
+            && child.kind() == "file_scoped_namespace_declaration"
+            && let Some(name) = symbol_name_node(child, language)
+                .and_then(|name| name.utf8_text(source).ok())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+        {
+            sibling_namespace = Some(qualify_namespace(next_namespace.as_deref(), name));
+        }
+    }
+}
+
+fn qualify_namespace(parent: Option<&str>, name: &str) -> String {
+    match parent {
+        Some(parent) if name == parent || name.starts_with(&format!("{parent}.")) => {
+            name.to_owned()
+        }
+        Some(parent) => format!("{parent}.{name}"),
+        None => name.to_owned(),
     }
 }
 
@@ -126,6 +173,7 @@ fn symbol_kind(node: Node<'_>, language: SupportedLanguage) -> Option<&'static s
             _ => return None,
         },
         SupportedLanguage::CSharp => match node.kind() {
+            "namespace_declaration" | "file_scoped_namespace_declaration" => "namespace",
             "class_declaration" => "class",
             "record_declaration" => "record",
             "struct_declaration" => "struct",
@@ -169,9 +217,11 @@ mod tests {
     #[test]
     fn extracts_csharp_records_and_methods() {
         let source = br#"
-            public record DatabaseEntity(int Id);
-            public class DatabaseContext {
-                public void Save() {}
+            namespace Acme.Data {
+                public record DatabaseEntity(int Id);
+                public class DatabaseContext {
+                    public void Save() {}
+                }
             }
         "#;
         let symbols = parse_source(source, SupportedLanguage::CSharp).unwrap();
@@ -185,6 +235,23 @@ mod tests {
                 .iter()
                 .any(|symbol| symbol.name == "Save" && symbol.kind == "method")
         );
+        assert!(
+            symbols
+                .iter()
+                .any(|symbol| { symbol.name == "Acme.Data" && symbol.kind == "namespace" })
+        );
+        assert!(symbols.iter().any(|symbol| {
+            symbol.name == "DatabaseContext" && symbol.namespace.as_deref() == Some("Acme.Data")
+        }));
+    }
+
+    #[test]
+    fn applies_csharp_file_scoped_namespaces_to_following_symbols() {
+        let source = b"namespace Acme.Data;\npublic class DatabaseContext {}\n";
+        let symbols = parse_source(source, SupportedLanguage::CSharp).unwrap();
+        assert!(symbols.iter().any(|symbol| {
+            symbol.name == "DatabaseContext" && symbol.namespace.as_deref() == Some("Acme.Data")
+        }));
     }
 
     #[test]

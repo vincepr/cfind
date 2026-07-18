@@ -67,6 +67,7 @@ pub fn open_database(path: &Path) -> Result<Connection> {
              name TEXT NOT NULL,
              normalized_name TEXT NOT NULL,
              kind TEXT NOT NULL,
+             namespace TEXT,
              start_line INTEGER NOT NULL,
              start_column INTEGER NOT NULL,
              end_line INTEGER NOT NULL,
@@ -81,6 +82,7 @@ pub fn open_database(path: &Path) -> Result<Connection> {
          );",
     )?;
     ensure_repository_branch_column(&connection)?;
+    ensure_symbol_namespace_column(&connection)?;
     Ok(connection)
 }
 
@@ -91,6 +93,17 @@ fn ensure_repository_branch_column(connection: &Connection) -> Result<()> {
         .collect::<Result<HashSet<_>, _>>()?;
     if !columns.contains("branch") {
         connection.execute("ALTER TABLE repositories ADD COLUMN branch TEXT", [])?;
+    }
+    Ok(())
+}
+
+fn ensure_symbol_namespace_column(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(symbols)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    if !columns.contains("namespace") {
+        connection.execute("ALTER TABLE symbols ADD COLUMN namespace TEXT", [])?;
     }
     Ok(())
 }
@@ -231,9 +244,9 @@ fn index_repository(
         transaction.execute("DELETE FROM symbols WHERE file_id = ?1", [file_id])?;
         let mut insert = transaction.prepare_cached(
             "INSERT INTO symbols(
-                file_id, name, normalized_name, kind, start_line, start_column,
-                end_line, end_column, parent
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                file_id, name, normalized_name, kind, namespace, start_line,
+                start_column, end_line, end_column, parent
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )?;
         for symbol in file.symbols {
             insert.execute(params![
@@ -241,6 +254,7 @@ fn index_repository(
                 symbol.name,
                 symbol.name.to_ascii_lowercase(),
                 symbol.kind,
+                symbol.namespace,
                 symbol.start_line,
                 symbol.start_column,
                 symbol.end_line,
@@ -304,6 +318,13 @@ pub fn index_exists(path: &Path) -> Result<bool> {
     if !repository_columns.contains("branch") {
         return Ok(false);
     }
+    let mut statement = connection.prepare("PRAGMA table_info(symbols)")?;
+    let symbol_columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    if !symbol_columns.contains("namespace") {
+        return Ok(false);
+    }
     let metadata_exists = connection
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'index_metadata'",
@@ -351,6 +372,26 @@ mod tests {
                     root TEXT NOT NULL UNIQUE,
                     remote TEXT,
                     revision TEXT NOT NULL
+                );
+                CREATE TABLE files (
+                    id INTEGER PRIMARY KEY,
+                    repository_id INTEGER NOT NULL,
+                    path TEXT NOT NULL,
+                    blob_id TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    UNIQUE(repository_id, path)
+                );
+                CREATE TABLE symbols (
+                    id INTEGER PRIMARY KEY,
+                    file_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    normalized_name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    start_line INTEGER NOT NULL,
+                    start_column INTEGER NOT NULL,
+                    end_line INTEGER NOT NULL,
+                    end_column INTEGER NOT NULL,
+                    parent TEXT
                 );",
             )
             .unwrap();
@@ -366,6 +407,13 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(columns.iter().any(|column| column == "branch"));
+        let mut statement = connection.prepare("PRAGMA table_info(symbols)").unwrap();
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "namespace"));
     }
 
     #[test]

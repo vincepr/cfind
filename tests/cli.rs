@@ -22,6 +22,12 @@ fn help_documents_required_environment_and_path_filters() {
     assert!(stdout.contains("[default: 10]"), "{stdout}");
     assert!(stdout.contains("--quiet"), "{stdout}");
     assert!(
+        stdout.contains("omit TYPE to list indexed kinds"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("--verbose"), "{stdout}");
+    assert!(stdout.contains("code-search --type"), "{stdout}");
+    assert!(
         stdout.contains("CODE_SEARCH_LANGUAGES=rust,javascript,typescript,csharp"),
         "{stdout}"
     );
@@ -181,7 +187,7 @@ fn search_filters_results_by_path_regex() {
     .unwrap();
     fs::write(
         workspace.join("src/Shared.cs"),
-        "public class SharedSymbol {}\n",
+        "namespace Acme.Data;\npublic class SharedSymbol {}\n",
     )
     .unwrap();
 
@@ -193,6 +199,53 @@ fn search_filters_results_by_path_regex() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("src/Shared.cs"), "{stdout}");
     assert!(!stdout.contains("src/shared.rs"), "{stdout}");
+
+    let output = code_search_command(&workspace, &index_path)
+        .arg("--type")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "class\nnamespace\nstruct\n"
+    );
+
+    let output = code_search_command(&workspace, &index_path)
+        .args(["SharedSymbol", "--type", "class"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("src/Shared.cs"), "{stdout}");
+    assert!(!stdout.contains("src/shared.rs"), "{stdout}");
+
+    let output = code_search_command(&workspace, &index_path)
+        .args(["SharedSymbol", "--type", "class", "--verbose"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("namespace Acme.Data"), "{stdout}");
+
+    let output = code_search_command(&workspace, &index_path)
+        .args(["Acme.Data", "--type", "namespace"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("namespace  Acme.Data"), "{stdout}");
+
+    let output = code_search_command(&workspace, &index_path)
+        .args(["SharedSymbol", "--type", "component"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown type 'component'"), "{stderr}");
+    assert!(
+        stderr.contains("available types: class, namespace, struct"),
+        "{stderr}"
+    );
 }
 
 fn code_search_command(workspace: &Path, index_path: &Path) -> Command {

@@ -23,7 +23,15 @@ pub fn search(
     from: &Path,
     limit: usize,
 ) -> Result<Vec<SearchResult>> {
-    search_filtered(connection, query, from, limit, None)
+    search_filtered(connection, query, from, limit, None, None)
+}
+
+pub fn distinct_symbol_kinds(connection: &Connection) -> Result<Vec<String>> {
+    let mut statement = connection.prepare("SELECT DISTINCT kind FROM symbols ORDER BY kind")?;
+    let kinds = statement
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(kinds)
 }
 
 pub fn search_filtered(
@@ -32,6 +40,7 @@ pub fn search_filtered(
     from: &Path,
     limit: usize,
     path_filter: Option<&str>,
+    symbol_kind: Option<&str>,
 ) -> Result<Vec<SearchResult>> {
     let query_normalized = query.to_ascii_lowercase();
     let path_filter = path_filter
@@ -39,7 +48,7 @@ pub fn search_filtered(
         .transpose()
         .context("invalid --filter regex")?;
     let mut statement = connection.prepare(
-        "SELECT s.name, s.kind, s.parent, s.start_line, s.end_line,
+        "SELECT s.name, s.kind, s.parent, s.namespace, s.start_line, s.end_line,
                 f.path, r.root, r.remote, r.revision, r.branch
          FROM symbols s
          JOIN files f ON f.id = s.file_id
@@ -50,13 +59,14 @@ pub fn search_filtered(
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, Option<String>>(2)?,
-            row.get::<_, usize>(3)?,
+            row.get::<_, Option<String>>(3)?,
             row.get::<_, usize>(4)?,
-            row.get::<_, String>(5)?,
+            row.get::<_, usize>(5)?,
             row.get::<_, String>(6)?,
-            row.get::<_, Option<String>>(7)?,
-            row.get::<_, String>(8)?,
-            row.get::<_, Option<String>>(9)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, Option<String>>(8)?,
+            row.get::<_, String>(9)?,
+            row.get::<_, Option<String>>(10)?,
         ))
     })?;
 
@@ -66,6 +76,7 @@ pub fn search_filtered(
             name,
             kind,
             parent,
+            namespace,
             start_line,
             end_line,
             relative_path,
@@ -74,6 +85,9 @@ pub fn search_filtered(
             revision,
             branch,
         ) = row?;
+        if symbol_kind.is_some_and(|filter| kind != filter) {
+            continue;
+        }
         if path_filter
             .as_ref()
             .is_some_and(|filter| !filter.is_match(&relative_path))
@@ -101,6 +115,7 @@ pub fn search_filtered(
                 name,
                 kind,
                 match_score: similarity.min(10_000) as u16,
+                namespace,
                 parent,
                 local_path,
                 relative_path: relative_path.clone(),

@@ -61,6 +61,9 @@ code-search DatabaseContext --index
 code-search DatabaseContext --from "$HOME/code/marketplace/api" --limit 10
 code-search GzipDecompress -f '\.cs$'
 code-search Config -f '^src/.*\.rs$'
+code-search --type
+code-search DatabaseContext --type class
+code-search DatabaseContext --type class --verbose
 code-search DatabaseContext --commit-url
 code-search DatabaseContext --quiet
 code-search --status
@@ -80,6 +83,14 @@ example, `--filter '\.cs$'` matches C# files anywhere in a repository.
 Searches return at most 10 results by default; use `--limit` to change that.
 Pass `--quiet` to omit repository URLs from results, including when
 `--commit-url` is also present.
+
+Use `--type class` (or another indexed kind) to restrict symbol kinds. Run
+`code-search --type` without a query or value to list every distinct kind in the
+current index. Unknown kinds return an error containing the available values.
+
+C# namespace declarations are indexed as searchable `namespace` symbols.
+Containing namespaces are stored on other C# symbols and included in output
+with `--verbose`.
 
 Indexing is incremental. Git blob IDs identify unchanged files, tracked files
 with uncommitted changes are re-parsed, changed files are parsed in parallel,
