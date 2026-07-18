@@ -27,33 +27,18 @@ pub enum SupportedLanguage {
 }
 
 impl SupportedLanguage {
+    pub const ALL: [Self; 4] = [Self::Rust, Self::JavaScript, Self::TypeScript, Self::CSharp];
+
     pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "rust" | "rs" => Some(Self::Rust),
-            "javascript" | "js" => Some(Self::JavaScript),
-            "typescript" | "ts" => Some(Self::TypeScript),
-            "csharp" | "c#" | "cs" => Some(Self::CSharp),
-            _ => None,
-        }
+        crate::language::language_from_alias(value)
     }
 
     pub fn from_path(path: &Path) -> Option<Self> {
-        match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
-            "rs" => Some(Self::Rust),
-            "js" | "jsx" | "mjs" | "cjs" => Some(Self::JavaScript),
-            "ts" | "tsx" | "mts" | "cts" => Some(Self::TypeScript),
-            "cs" => Some(Self::CSharp),
-            _ => None,
-        }
+        crate::language::language_from_path(path)
     }
 
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Rust => "rust",
-            Self::JavaScript => "javascript",
-            Self::TypeScript => "typescript",
-            Self::CSharp => "csharp",
-        }
+        crate::language::language_name(self)
     }
 }
 
