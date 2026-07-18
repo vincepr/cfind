@@ -1,6 +1,6 @@
-# code-search
+# cfind
 
-`code-search` is a local, Git-aware symbol indexer. It parses tracked Rust,
+`cfind` is a local, Git-aware symbol indexer. It parses tracked Rust,
 JavaScript, TypeScript, and C# files with Tree-sitter and returns both local
 locations and commit-pinned GitHub or GitLab links.
 
@@ -18,40 +18,40 @@ cargo install --path .
 Configuration is environment-based:
 
 ```bash
-export CODE_SEARCH_ROOT="$HOME/code"
-export CODE_SEARCH_LANGUAGES="rust,javascript,typescript,csharp"
-export CODE_SEARCH_FETCH_STALE_DAYS=3
+export CFIND_ROOT="$HOME/code"
+export CFIND_LANGUAGES="rust,javascript,typescript,csharp"
+export CFIND_FETCH_STALE_DAYS=3
 ```
 
-`CODE_SEARCH_ROOT` is required; the tool exits without creating or opening an
-index when it is unset or empty. `CODE_SEARCH_LANGUAGES` defaults to all
+`CFIND_ROOT` is required; the tool exits without creating or opening an
+index when it is unset or empty. `CFIND_LANGUAGES` defaults to all
 supported languages. Indexes are stored in the operating system's user data
 directory:
 
-- Linux: `$XDG_DATA_HOME/code-search/indexes`, or
-  `~/.local/share/code-search/indexes` when `XDG_DATA_HOME` is unset
-- macOS: `~/Library/Application Support/code-search/indexes`
-- Windows: `%LOCALAPPDATA%\code-search\indexes`
+- Linux: `$XDG_DATA_HOME/cfind/indexes`, or
+  `~/.local/share/cfind/indexes` when `XDG_DATA_HOME` is unset
+- macOS: `~/Library/Application Support/cfind/indexes`
+- Windows: `%LOCALAPPDATA%\cfind\indexes`
 
-Each canonical `CODE_SEARCH_ROOT` gets a stable, independent database in that
+Each canonical `CFIND_ROOT` gets a stable, independent database in that
 directory. Generated database names end in `.sqlite`.
 
 The root also acts as the workspace selector. For example, these commands use
 independent databases without any additional configuration:
 
 ```bash
-CODE_SEARCH_ROOT="$HOME/code/rust" code-search --index
-CODE_SEARCH_ROOT="$HOME/code" code-search --index
+CFIND_ROOT="$HOME/code/rust" cfind --index
+CFIND_ROOT="$HOME/code" cfind --index
 
-CODE_SEARCH_ROOT="$HOME/code/rust" code-search DatabaseContext
-CODE_SEARCH_ROOT="$HOME/code" code-search DatabaseContext
+CFIND_ROOT="$HOME/code/rust" cfind DatabaseContext
+CFIND_ROOT="$HOME/code" cfind DatabaseContext
 ```
 
-Set `CODE_SEARCH_INDEX` to override the database path explicitly.
+Set `CFIND_INDEX` to override the database path explicitly.
 
 Language aliases such as `rs`, `js`, `ts`, `cs`, and `c#` are accepted.
 
-`CODE_SEARCH_FETCH_STALE_DAYS` defaults to `3`. Results from a repository whose
+`CFIND_FETCH_STALE_DAYS` defaults to `3`. Results from a repository whose
 last fetch is older than that threshold, whose current branch is not the cached
 origin default branch, or whose fetch state is unknown include a compact
 `local-state(...)` suffix. Fresh results include no state suffix. Set the value
@@ -60,18 +60,18 @@ to `0` to disable Git-state collection and output.
 ## Use
 
 ```bash
-code-search --index
-code-search DatabaseContext
-code-search DatabaseContext --index
-code-search DatabaseContext --from "$HOME/code/marketplace/api" --limit 10
-code-search GzipDecompress -f '\.cs$'
-code-search Config -f '^src/.*\.rs$'
-code-search --type
-code-search DatabaseContext --type class
-code-search DatabaseContext --type class --verbose
-code-search DatabaseContext --commit-url
-code-search DatabaseContext --quiet
-code-search --status
+cfind --index
+cfind DatabaseContext
+cfind DatabaseContext --index
+cfind DatabaseContext --from "$HOME/code/marketplace/api" --limit 10
+cfind GzipDecompress -f '\.cs$'
+cfind Config -f '^src/.*\.rs$'
+cfind --type
+cfind DatabaseContext --type class
+cfind DatabaseContext --type class --verbose
+cfind DatabaseContext --commit-url
+cfind DatabaseContext --quiet
+cfind --status
 ```
 
 `--index` by itself reports indexing details and exits. With a query, it
@@ -90,7 +90,7 @@ Pass `--quiet` to omit repository URLs from results, including when
 `--commit-url` is also present.
 
 Use `--type class` (or another indexed kind) to restrict symbol kinds. Run
-`code-search --type` without a query or value to list every distinct kind in the
+`cfind --type` without a query or value to list every distinct kind in the
 current index. Unknown kinds return an error containing the available values.
 
 C# namespace declarations are indexed as searchable `namespace` symbols.
@@ -115,6 +115,6 @@ GitHub and GitLab links use the repository's default or tracked branch to keep
 normal output compact. Pass `--commit-url` to prefer an immutable URL using the
 commit that was current during indexing; it falls back to the branch URL when a
 commit URL is unavailable. URLs are omitted when neither form is available.
-Re-run `code-search --index` after changing branches or commits to refresh links
+Re-run `cfind --index` after changing branches or commits to refresh links
 and symbols. Searches also print a warning with the re-index command when the
 last successful indexing run was more than one day ago.

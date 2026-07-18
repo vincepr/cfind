@@ -6,15 +6,15 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-pub const ROOT_ENV: &str = "CODE_SEARCH_ROOT";
-pub const LANGUAGES_ENV: &str = "CODE_SEARCH_LANGUAGES";
-pub const INDEX_ENV: &str = "CODE_SEARCH_INDEX";
-pub const FETCH_STALE_DAYS_ENV: &str = "CODE_SEARCH_FETCH_STALE_DAYS";
+pub const ROOT_ENV: &str = "CFIND_ROOT";
+pub const LANGUAGES_ENV: &str = "CFIND_LANGUAGES";
+pub const INDEX_ENV: &str = "CFIND_INDEX";
+pub const FETCH_STALE_DAYS_ENV: &str = "CFIND_FETCH_STALE_DAYS";
 const DEFAULT_FETCH_STALE_DAYS: u64 = 3;
 #[cfg(not(target_os = "windows"))]
-const ROOT_REQUIRED_MESSAGE: &str = "CODE_SEARCH_ROOT is required; set it to the directory containing your repositories, for example: export CODE_SEARCH_ROOT=\"$HOME/code\"";
+const ROOT_REQUIRED_MESSAGE: &str = "CFIND_ROOT is required; set it to the directory containing your repositories, for example: export CFIND_ROOT=\"$HOME/code\"";
 #[cfg(target_os = "windows")]
-const ROOT_REQUIRED_MESSAGE: &str = "CODE_SEARCH_ROOT is required; set it to the directory containing your repositories, for example: $env:CODE_SEARCH_ROOT=\"C:\\path\\to\\code\"";
+const ROOT_REQUIRED_MESSAGE: &str = "CFIND_ROOT is required; set it to the directory containing your repositories, for example: $env:CFIND_ROOT=\"C:\\path\\to\\code\"";
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub const DATA_HOME_ENV: &str = "XDG_DATA_HOME";
 
@@ -111,7 +111,7 @@ impl Config {
 
 fn default_index_path(root: &Path) -> Result<PathBuf> {
     Ok(platform_data_home()?
-        .join("code-search/indexes")
+        .join("cfind/indexes")
         .join(format!("{:032x}.sqlite", namespace_hash(root))))
 }
 
@@ -120,13 +120,13 @@ fn platform_data_home() -> Result<PathBuf> {
     env::var_os("LOCALAPPDATA")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
-        .context("LOCALAPPDATA is not set; set CODE_SEARCH_INDEX to choose an index location")
+        .context("LOCALAPPDATA is not set; set CFIND_INDEX to choose an index location")
 }
 
 #[cfg(target_os = "macos")]
 fn platform_data_home() -> Result<PathBuf> {
     let home = env::var_os("HOME")
-        .context("HOME is not set; set CODE_SEARCH_INDEX to choose an index location")?;
+        .context("HOME is not set; set CFIND_INDEX to choose an index location")?;
     Ok(PathBuf::from(home).join("Library/Application Support"))
 }
 
@@ -136,7 +136,7 @@ fn platform_data_home() -> Result<PathBuf> {
         Some(path) if !path.is_empty() => Ok(PathBuf::from(path)),
         _ => {
             let home = env::var_os("HOME")
-                .context("HOME is not set; set CODE_SEARCH_INDEX to choose an index location")?;
+                .context("HOME is not set; set CFIND_INDEX to choose an index location")?;
             Ok(PathBuf::from(home).join(".local/share"))
         }
     }

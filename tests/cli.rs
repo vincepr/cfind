@@ -4,17 +4,14 @@ use tempfile::TempDir;
 
 #[test]
 fn help_documents_required_environment_and_path_filters() {
-    let output = Command::new(env!("CARGO_BIN_EXE_code-search"))
+    let output = Command::new(env!("CARGO_BIN_EXE_cfind"))
         .arg("--help")
-        .env_remove("CODE_SEARCH_ROOT")
+        .env_remove("CFIND_ROOT")
         .output()
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("CODE_SEARCH_ROOT=/path/to/code"),
-        "{stdout}"
-    );
+    assert!(stdout.contains("CFIND_ROOT=/path/to/code"), "{stdout}");
     assert!(stdout.contains("Required repository directory"), "{stdout}");
     assert!(stdout.contains(r"-f '\.cs$'"), "{stdout}");
     assert!(stdout.contains("Path regex"), "{stdout}");
@@ -26,20 +23,17 @@ fn help_documents_required_environment_and_path_filters() {
         "{stdout}"
     );
     assert!(stdout.contains("--verbose"), "{stdout}");
-    assert!(stdout.contains("code-search --type"), "{stdout}");
+    assert!(stdout.contains("cfind --type"), "{stdout}");
     assert!(
-        stdout.contains("CODE_SEARCH_LANGUAGES=rust,javascript,typescript,csharp"),
+        stdout.contains("CFIND_LANGUAGES=rust,javascript,typescript,csharp"),
         "{stdout}"
     );
     assert!(
-        stdout.contains("CODE_SEARCH_INDEX=/path/to/index.sqlite"),
+        stdout.contains("CFIND_INDEX=/path/to/index.sqlite"),
         "{stdout}"
     );
     assert!(stdout.contains("--commit-url"), "{stdout}");
-    assert!(
-        stdout.contains("CODE_SEARCH_FETCH_STALE_DAYS=3"),
-        "{stdout}"
-    );
+    assert!(stdout.contains("CFIND_FETCH_STALE_DAYS=3"), "{stdout}");
     assert!(stdout.contains("0 disables Git state"), "{stdout}");
 }
 
@@ -47,18 +41,18 @@ fn help_documents_required_environment_and_path_filters() {
 fn missing_root_exits_without_creating_an_index() {
     let temporary = TempDir::new().unwrap();
     let index_path = temporary.path().join("must-not-exist.sqlite");
-    let output = Command::new(env!("CARGO_BIN_EXE_code-search"))
+    let output = Command::new(env!("CARGO_BIN_EXE_cfind"))
         .arg("Anything")
-        .env_remove("CODE_SEARCH_ROOT")
-        .env("CODE_SEARCH_INDEX", &index_path)
+        .env_remove("CFIND_ROOT")
+        .env("CFIND_INDEX", &index_path)
         .output()
         .unwrap();
 
     assert!(!output.status.success());
     assert!(!index_path.exists());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("CODE_SEARCH_ROOT is required"), "{stderr}");
-    assert!(stderr.contains("export CODE_SEARCH_ROOT"), "{stderr}");
+    assert!(stderr.contains("CFIND_ROOT is required"), "{stderr}");
+    assert!(stderr.contains("export CFIND_ROOT"), "{stderr}");
 }
 
 #[test]
@@ -75,7 +69,7 @@ fn search_creates_a_missing_index_and_then_returns_results() {
     .unwrap();
     run_git(&workspace, &["add", "src/lib.rs"]);
 
-    let output = code_search_command(&workspace, &index_path)
+    let output = cfind_command(&workspace, &index_path)
         .arg("AutoIndexedSymbol")
         .output()
         .unwrap();
@@ -93,7 +87,7 @@ fn search_creates_a_missing_index_and_then_returns_results() {
         "{stderr}"
     );
 
-    let output = code_search_command(&workspace, &index_path)
+    let output = cfind_command(&workspace, &index_path)
         .arg("--index")
         .output()
         .unwrap();
@@ -105,7 +99,7 @@ fn search_creates_a_missing_index_and_then_returns_results() {
         "{stderr}"
     );
 
-    let output = code_search_command(&workspace, &index_path)
+    let output = cfind_command(&workspace, &index_path)
         .args(["AutoIndexedSymbol", "--index"])
         .output()
         .unwrap();
@@ -130,7 +124,7 @@ fn branch_urls_are_default_and_commit_urls_are_opt_in() {
         &workspace,
         &[
             "-c",
-            "user.name=Code Search Test",
+            "user.name=Cfind Test",
             "-c",
             "user.email=test@example.com",
             "commit",
@@ -156,7 +150,7 @@ fn branch_urls_are_default_and_commit_urls_are_opt_in() {
         ],
     );
 
-    let output = code_search_command(&workspace, &index_path)
+    let output = cfind_command(&workspace, &index_path)
         .arg("RemoteSymbol")
         .output()
         .unwrap();
@@ -170,7 +164,7 @@ fn branch_urls_are_default_and_commit_urls_are_opt_in() {
     );
     assert!(!stdout.contains("#L"), "{stdout}");
 
-    let output = code_search_command(&workspace, &index_path)
+    let output = cfind_command(&workspace, &index_path)
         .args(["RemoteSymbol", "--commit-url"])
         .output()
         .unwrap();
@@ -182,9 +176,9 @@ fn branch_urls_are_default_and_commit_urls_are_opt_in() {
     );
     assert!(!stdout.contains("/blob/main/"), "{stdout}");
 
-    let output = code_search_command(&workspace, &index_path)
+    let output = cfind_command(&workspace, &index_path)
         .args(["RemoteSymbol", "--commit-url", "--quiet"])
-        .env("CODE_SEARCH_FETCH_STALE_DAYS", "0")
+        .env("CFIND_FETCH_STALE_DAYS", "0")
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -217,7 +211,7 @@ fn search_filters_results_by_path_regex() {
         &["remote", "add", "origin", "git@github.com:acme/shared.git"],
     );
 
-    let output = code_search_command(&workspace, &index_path)
+    let output = cfind_command(&workspace, &index_path)
         .args(["SharedSymbol", "--filter", r"\.cs$"])
         .output()
         .unwrap();
@@ -227,7 +221,7 @@ fn search_filters_results_by_path_regex() {
     assert!(!stdout.contains("src/shared.rs"), "{stdout}");
     assert!(stdout.ends_with("\n\n"), "{stdout}");
 
-    let output = code_search_command(&workspace, &index_path)
+    let output = cfind_command(&workspace, &index_path)
         .arg("--type")
         .output()
         .unwrap();
@@ -237,7 +231,7 @@ fn search_filters_results_by_path_regex() {
         "class\nnamespace\nstruct\n"
     );
 
-    let output = code_search_command(&workspace, &index_path)
+    let output = cfind_command(&workspace, &index_path)
         .args(["SharedSymbol", "--type", "class"])
         .output()
         .unwrap();
@@ -246,7 +240,7 @@ fn search_filters_results_by_path_regex() {
     assert!(stdout.contains("src/Shared.cs"), "{stdout}");
     assert!(!stdout.contains("src/shared.rs"), "{stdout}");
 
-    let output = code_search_command(&workspace, &index_path)
+    let output = cfind_command(&workspace, &index_path)
         .args(["SharedSymbol", "--type", "class", "--verbose"])
         .output()
         .unwrap();
@@ -259,7 +253,7 @@ fn search_filters_results_by_path_regex() {
     let namespace = stdout.rfind("\n  Acme.Data").unwrap();
     assert!(path < url && url < namespace, "{stdout}");
 
-    let output = code_search_command(&workspace, &index_path)
+    let output = cfind_command(&workspace, &index_path)
         .args(["Acme.Data", "--type", "namespace"])
         .output()
         .unwrap();
@@ -267,7 +261,7 @@ fn search_filters_results_by_path_regex() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("namespace  Acme.Data"), "{stdout}");
 
-    let output = code_search_command(&workspace, &index_path)
+    let output = cfind_command(&workspace, &index_path)
         .args(["SharedSymbol", "--type", "component"])
         .output()
         .unwrap();
@@ -280,12 +274,12 @@ fn search_filters_results_by_path_regex() {
     );
 }
 
-fn code_search_command(workspace: &Path, index_path: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_code-search"));
+fn cfind_command(workspace: &Path, index_path: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cfind"));
     command
         .current_dir(workspace)
-        .env("CODE_SEARCH_ROOT", workspace)
-        .env("CODE_SEARCH_INDEX", index_path);
+        .env("CFIND_ROOT", workspace)
+        .env("CFIND_INDEX", index_path);
     command
 }
 

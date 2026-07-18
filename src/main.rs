@@ -1,18 +1,18 @@
 use std::{env, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
-use code_search::{
+use cfind::{
     config::Config,
     index::{index_exists, index_is_stale, open_database, rebuild},
     search::{canonical_search_origin, distinct_symbol_kinds, require_query, search_filtered},
 };
+use clap::Parser;
 
 #[derive(Debug, Parser)]
 #[command(
     version,
     about = "Local code symbol search",
-    after_help = "Examples:\n  code-search DatabaseContext\n  code-search GzipDecompress -f '\\.cs$'\n  code-search --type\n  code-search --index\n  code-search --status\n\nEnvironment:\n  CODE_SEARCH_ROOT=/path/to/code                         Required repository directory\n  CODE_SEARCH_INDEX=/path/to/index.sqlite                Optional exact database path\n  CODE_SEARCH_LANGUAGES=rust,javascript,typescript,csharp Optional languages (default: all)\n  CODE_SEARCH_FETCH_STALE_DAYS=3                          Fetch-age threshold; 0 disables Git state"
+    after_help = "Examples:\n  cfind DatabaseContext\n  cfind GzipDecompress -f '\\.cs$'\n  cfind --type\n  cfind --index\n  cfind --status\n\nEnvironment:\n  CFIND_ROOT=/path/to/code                         Required repository directory\n  CFIND_INDEX=/path/to/index.sqlite                Optional exact database path\n  CFIND_LANGUAGES=rust,javascript,typescript,csharp Optional languages (default: all)\n  CFIND_FETCH_STALE_DAYS=3                          Fetch-age threshold; 0 disables Git state"
 )]
 struct Cli {
     /// Symbol name (fuzzy matching supported).
@@ -105,7 +105,7 @@ fn run() -> Result<()> {
     )?;
     if index_is_stale(&connection)? {
         eprintln!(
-            "warning: the code-search index is more than one day old; re-index with: {}",
+            "warning: the cfind index is more than one day old; re-index with: {}",
             reindex_command(&config)
         );
     }
@@ -203,7 +203,7 @@ fn reindex_command(config: &Config) -> String {
     }
 
     format!(
-        "CODE_SEARCH_ROOT={} CODE_SEARCH_INDEX={} code-search --index",
+        "CFIND_ROOT={} CFIND_INDEX={} cfind --index",
         quote(&config.root),
         quote(&config.index_path)
     )
@@ -216,7 +216,7 @@ fn reindex_command(config: &Config) -> String {
     }
 
     format!(
-        "$env:CODE_SEARCH_ROOT={}; $env:CODE_SEARCH_INDEX={}; code-search --index",
+        "$env:CFIND_ROOT={}; $env:CFIND_INDEX={}; cfind --index",
         quote(&config.root),
         quote(&config.index_path)
     )

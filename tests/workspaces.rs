@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fs, path::Path, process::Command};
 
-use code_search::{
+use cfind::{
     config::{Config, SupportedLanguage},
     index::{open_database, rebuild},
     search::search,
@@ -124,7 +124,7 @@ fn cli_version_change_reparses_unchanged_files() {
 fn config(root: &Path, language: SupportedLanguage) -> Config {
     Config {
         root: root.to_path_buf(),
-        index_path: root.join(".code-search.sqlite3"),
+        index_path: root.join(".cfind.sqlite3"),
         languages: HashSet::from([language]),
         fetch_stale_days: 3,
     }
@@ -139,7 +139,7 @@ fn create_repository(root: &Path, relative_path: &str, source: &str) {
         root,
         &[
             "-c",
-            "user.name=Code Search Test",
+            "user.name=Cfind Test",
             "-c",
             "user.email=test@example.com",
             "commit",
