@@ -3,7 +3,7 @@ use std::{env, path::PathBuf};
 use anyhow::{Context, Result, bail};
 use cfind::{
     config::Config,
-    index::{index_exists, index_is_stale, open_database, rebuild},
+    index::{IndexState, index_state, open_database, rebuild},
     search::{canonical_search_origin, distinct_symbol_kinds, require_query, search_filtered},
 };
 use clap::Parser;
@@ -12,7 +12,7 @@ use clap::Parser;
 #[command(
     version,
     about = "Local code symbol search",
-    after_help = "Examples:\n  cfind DatabaseContext\n  cfind GzipDecompress -f '\\.cs$'\n  cfind --type\n  cfind --index\n  cfind --status\n\nEnvironment:\n  CFIND_ROOT=/path/to/code                         Required repository directory\n  CFIND_INDEX=/path/to/index.sqlite                Optional exact database path\n  CFIND_LANGUAGES=rust,javascript,typescript,csharp Optional languages (default: all)\n  CFIND_FETCH_STALE_DAYS=3                          Fetch-age threshold; 0 disables Git state"
+    after_help = "Examples:\n  cfind DatabaseContext\n  cfind GzipDecompress -f '\\.cs$'\n  cfind --type\n  cfind --index\n  cfind --status\n\nEnvironment:\n  CFIND_ROOT=/path/to/code                         Required repository directory\n  CFIND_INDEX=/path/to/index.sqlite                Optional exact database path\n  CFIND_LANGUAGES=rust,javascript,typescript,csharp Optional languages (default: all)\n  CFIND_FETCH_STALE_DAYS=3                          Fetch-age threshold; 0 disables Git state\n  CFIND_WARN_AFTER_HOURS=6                          Warn about index age; rebuild after 3x"
 )]
 struct Cli {
     /// Symbol name (fuzzy matching supported).
@@ -67,14 +67,20 @@ fn run() -> Result<()> {
     if cli.query.is_none() && !list_types {
         bail!("query required (or use --type to list indexed kinds)");
     }
-    if cli.index {
+    let warn_about_age = if cli.index {
         rebuild(&config)?;
-    } else if !index_exists(&config.index_path)? {
-        eprintln!("No index found.");
-        eprintln!("Creating SQLite index at {}.", config.index_path.display());
-        run_automatic_index(&config)?;
-    }
+        false
+    } else {
+        ensure_index(&config)?
+    };
     let connection = open_database(&config.index_path)?;
+    if warn_about_age {
+        eprintln!(
+            "warning: the cfind index is older than {}; re-index with: {}",
+            warning_period(&config),
+            reindex_command(&config)
+        );
+    }
     let kinds = distinct_symbol_kinds(&connection)?;
     if list_types {
         for kind in kinds {
@@ -103,12 +109,6 @@ fn run() -> Result<()> {
         &cli.from
             .unwrap_or(env::current_dir().context("could not determine current directory")?),
     )?;
-    if index_is_stale(&connection)? {
-        eprintln!(
-            "warning: the cfind index is more than one day old; re-index with: {}",
-            reindex_command(&config)
-        );
-    }
     let results = search_filtered(
         &connection,
         &query,
@@ -160,9 +160,19 @@ fn run() -> Result<()> {
 }
 
 fn run_status(config: &Config) -> Result<()> {
-    if !index_exists(&config.index_path)? {
-        println!("No index at {}", config.index_path.display());
-        return Ok(());
+    match index_state(&config.index_path, config)? {
+        IndexState::Missing => {
+            println!("No index at {}", config.index_path.display());
+            return Ok(());
+        }
+        IndexState::ConfigurationMismatch => {
+            println!(
+                "Index configuration does not match at {}",
+                config.index_path.display()
+            );
+            return Ok(());
+        }
+        IndexState::Fresh | IndexState::Warn | IndexState::Rebuild => {}
     }
     let connection = open_database(&config.index_path)?;
     let repositories: usize =
@@ -189,6 +199,36 @@ fn run_automatic_index(config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn ensure_index(config: &Config) -> Result<bool> {
+    match index_state(&config.index_path, config)? {
+        IndexState::Missing => {
+            eprintln!("No index found.");
+            eprintln!("Creating SQLite index at {}.", config.index_path.display());
+            run_automatic_index(config)?;
+        }
+        IndexState::ConfigurationMismatch => {
+            eprintln!("Index configuration changed; rebuilding SQLite index.");
+            run_automatic_index(config)?;
+        }
+        IndexState::Rebuild => {
+            eprintln!("Index age exceeded the automatic rebuild threshold; rebuilding.");
+            run_automatic_index(config)?;
+        }
+        IndexState::Warn => return Ok(true),
+        IndexState::Fresh => {}
+    }
+    Ok(false)
+}
+
+fn warning_period(config: &Config) -> String {
+    let hours = config.warn_after.as_secs() / (60 * 60);
+    if hours == 1 {
+        "1 hour".to_owned()
+    } else {
+        format!("{hours} hours")
+    }
+}
+
 fn rebuild_with_progress(config: &Config) -> Result<cfind::index::IndexStats> {
     eprintln!(
         "Indexing {} and writing to {}.",
@@ -200,12 +240,11 @@ fn rebuild_with_progress(config: &Config) -> Result<cfind::index::IndexStats> {
 
 fn index_summary(stats: &cfind::index::IndexStats) -> String {
     format!(
-        "Indexed {} symbols from {} source files in {} repositories ({} parsed, {} unchanged) in {} ms.",
+        "Indexed {} symbols from {} source files in {} repositories ({} parsed) in {} ms.",
         stats.symbols,
         stats.tracked_source_files,
         stats.repositories,
         stats.parsed_files,
-        stats.unchanged_files,
         stats.elapsed_ms
     )
 }

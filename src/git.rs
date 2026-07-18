@@ -27,8 +27,6 @@ pub struct Repository {
 #[derive(Debug, Clone)]
 pub struct TrackedFile {
     pub path: String,
-    pub blob_id: String,
-    pub dirty: bool,
 }
 
 fn is_git_metadata(entry: &DirEntry) -> bool {
@@ -188,12 +186,6 @@ fn git_metadata_time(repository: &Path, git_path: &str) -> Option<u64> {
 }
 
 pub fn tracked_files(repository: &Repository) -> Result<Vec<TrackedFile>> {
-    let dirty_paths = git_output_bytes(&repository.root, &["diff-files", "--name-only", "-z"])?
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| git_path(path, &repository.root))
-        .filter_map(Result::transpose)
-        .collect::<Result<HashSet<_>>>()?;
     let deleted_paths = git_output_bytes(&repository.root, &["ls-files", "--deleted", "-z"])?
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
@@ -216,16 +208,12 @@ pub fn tracked_files(repository: &Repository) -> Result<Vec<TrackedFile>> {
         };
         let mut fields = metadata.split_whitespace();
         let _mode = fields.next();
-        let Some(blob_id) = fields.next() else {
+        let Some(_blob_id) = fields.next() else {
             continue;
         };
         let stage = fields.next().unwrap_or("0");
         if stage == "0" && !deleted_paths.contains(&path) {
-            files.push(TrackedFile {
-                path: path.clone(),
-                blob_id: blob_id.to_owned(),
-                dirty: dirty_paths.contains(&path),
-            });
+            files.push(TrackedFile { path });
         }
     }
     Ok(files)

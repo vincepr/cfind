@@ -21,7 +21,7 @@ These rules apply to all contributors and coding agents working in this reposito
 - `src/config.rs` owns environment configuration and platform-specific index locations.
 - `src/git.rs` owns repository discovery and local Git metadata. Normal indexing and searching must
   not make network calls or require remote authentication.
-- `src/index.rs` owns SQLite schema, migrations, version metadata, and incremental indexing.
+- `src/index.rs` owns SQLite schema, configuration metadata, and fresh index replacement.
 - `src/search.rs` owns filtering and ranking.
 - `src/language/mod.rs` owns shared Tree-sitter parsing and traversal.
 - Each supported language owns its grammar metadata and symbol rules in
@@ -53,8 +53,8 @@ when it has an explicit adapter and tests demonstrating useful symbol extraction
 
 ## CLI and Configuration
 
-- `CFIND_ROOT` is required. `CFIND_INDEX`, `CFIND_LANGUAGES`, and
-  `CFIND_FETCH_STALE_DAYS` are optional.
+- `CFIND_ROOT` is required. `CFIND_INDEX`, `CFIND_LANGUAGES`,
+  `CFIND_FETCH_STALE_DAYS`, and `CFIND_WARN_AFTER_HOURS` are optional.
 - Keep `--help` concise but sufficient for an agent to discover every option and environment value.
 - Preserve the flat query-first interface. Do not introduce nested subcommands without an explicit
   product decision.
@@ -70,10 +70,9 @@ when it has an explicit adapter and tests demonstrating useful symbol extraction
 
 - Generated database filenames end in `.sqlite` and remain isolated by canonical `CFIND_ROOT`.
 - Update the index format version whenever stored data semantics require existing indexes to rebuild.
-- Keep schema upgrades safe for existing databases and record completion only after a successful
-  indexing run.
-- Preserve incremental indexing: unchanged Git blobs should not be parsed again unless a format or
-  CLI version change requires it.
+- Replace incompatible indexes safely and record completion only after a successful indexing run.
+- Build replacement indexes beside the active database and install them only after indexing
+  succeeds. Failed indexing must leave the previous complete index available.
 - Index only tracked, supported source files. Do not traverse ignored dependencies or untracked files
   as a fallback.
 - Keep normal Git inspection local. Any future network freshness feature must be explicit and must not

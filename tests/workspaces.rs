@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs, path::Path, process::Command};
+use std::{collections::HashSet, fs, path::Path, process::Command, time::Duration};
 
 use cfind::{
     config::{Config, SupportedLanguage},
@@ -91,7 +91,7 @@ fn reindexes_uncommitted_changes_to_tracked_files() {
 }
 
 #[test]
-fn cli_version_change_reparses_unchanged_files() {
+fn fresh_rebuild_reparses_unchanged_files() {
     let temporary = TempDir::new().unwrap();
     let workspace = temporary.path().join("workspace");
     create_repository(
@@ -105,12 +105,6 @@ fn cli_version_change_reparses_unchanged_files() {
     let database = open_database(&config.index_path).unwrap();
     database
         .execute("UPDATE symbols SET namespace = NULL", [])
-        .unwrap();
-    database
-        .execute(
-            "UPDATE index_metadata SET value = '0.0.0' WHERE key = 'cli_version'",
-            [],
-        )
         .unwrap();
     drop(database);
 
@@ -127,6 +121,7 @@ fn config(root: &Path, language: SupportedLanguage) -> Config {
         index_path: root.join(".cfind.sqlite3"),
         languages: HashSet::from([language]),
         fetch_stale_days: 3,
+        warn_after: Duration::from_secs(6 * 60 * 60),
     }
 }
 

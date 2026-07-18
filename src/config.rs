@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     env,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -10,7 +11,9 @@ pub const ROOT_ENV: &str = "CFIND_ROOT";
 pub const LANGUAGES_ENV: &str = "CFIND_LANGUAGES";
 pub const INDEX_ENV: &str = "CFIND_INDEX";
 pub const FETCH_STALE_DAYS_ENV: &str = "CFIND_FETCH_STALE_DAYS";
+pub const WARN_AFTER_HOURS_ENV: &str = "CFIND_WARN_AFTER_HOURS";
 const DEFAULT_FETCH_STALE_DAYS: u64 = 3;
+const DEFAULT_WARN_AFTER_HOURS: u64 = 6;
 #[cfg(not(target_os = "windows"))]
 const ROOT_REQUIRED_MESSAGE: &str = "CFIND_ROOT is required; set it to the directory containing your repositories, for example: export CFIND_ROOT=\"$HOME/code\"";
 #[cfg(target_os = "windows")]
@@ -52,6 +55,7 @@ pub struct Config {
     pub index_path: PathBuf,
     pub languages: HashSet<SupportedLanguage>,
     pub fetch_stale_days: u64,
+    pub warn_after: Duration,
 }
 
 impl Config {
@@ -92,12 +96,23 @@ impl Config {
                 })
             })
             .unwrap_or(Ok(DEFAULT_FETCH_STALE_DAYS))?;
+        let warn_after_hours = env::var(WARN_AFTER_HOURS_ENV)
+            .map(|value| {
+                value.parse::<u64>().with_context(|| {
+                    format!("{WARN_AFTER_HOURS_ENV} must be a non-negative number of hours")
+                })
+            })
+            .unwrap_or(Ok(DEFAULT_WARN_AFTER_HOURS))?;
+        let warn_after_seconds = warn_after_hours.checked_mul(60 * 60).with_context(|| {
+            format!("{WARN_AFTER_HOURS_ENV} is too large to represent as a duration")
+        })?;
 
         Ok(Self {
             root,
             index_path,
             languages,
             fetch_stale_days,
+            warn_after: Duration::from_secs(warn_after_seconds),
         })
     }
 }

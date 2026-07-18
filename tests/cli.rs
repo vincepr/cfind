@@ -1,5 +1,11 @@
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    path::Path,
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
+use cfind::index::open_database;
 use tempfile::TempDir;
 
 #[test]
@@ -35,6 +41,8 @@ fn help_documents_required_environment_and_path_filters() {
     assert!(stdout.contains("--commit-url"), "{stdout}");
     assert!(stdout.contains("CFIND_FETCH_STALE_DAYS=3"), "{stdout}");
     assert!(stdout.contains("0 disables Git state"), "{stdout}");
+    assert!(stdout.contains("CFIND_WARN_AFTER_HOURS=6"), "{stdout}");
+    assert!(stdout.contains("rebuild after 3x"), "{stdout}");
 }
 
 #[test]
@@ -142,6 +150,115 @@ fn invalid_configuration_fails_before_opening_the_index() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("CFIND_INDEX must not be empty"), "{stderr}");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cfind"))
+        .arg("Anything")
+        .env("CFIND_ROOT", temporary.path())
+        .env("CFIND_WARN_AFTER_HOURS", "soon")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("CFIND_WARN_AFTER_HOURS must be a non-negative number of hours"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn language_configuration_change_rebuilds_the_index() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let index_path = temporary.path().join("indexes/workspace.sqlite");
+    fs::create_dir_all(workspace.join("src")).unwrap();
+    run_git(temporary.path(), &["init", workspace.to_str().unwrap()]);
+    fs::write(workspace.join("src/lib.rs"), "pub struct RustSymbol;\n").unwrap();
+    fs::write(
+        workspace.join("src/Other.cs"),
+        "public class CSharpSymbol {}\n",
+    )
+    .unwrap();
+    run_git(&workspace, &["add", "src/lib.rs", "src/Other.cs"]);
+
+    let output = cfind_command(&workspace, &index_path)
+        .arg("CSharpSymbol")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("CSharpSymbol"));
+
+    let output = cfind_command(&workspace, &index_path)
+        .arg("RustSymbol")
+        .env("CFIND_LANGUAGES", "rust")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Index configuration changed"), "{stderr}");
+    let database = open_database(&index_path).unwrap();
+    let languages: String = database
+        .query_row(
+            "SELECT value FROM index_metadata WHERE key = 'languages'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(languages, "rust");
+    let csharp_files: usize = database
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE language = 'csharp'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(csharp_files, 0);
+}
+
+#[test]
+fn old_index_warns_then_rebuilds_after_three_warning_periods() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let index_path = temporary.path().join("indexes/workspace.sqlite");
+    fs::create_dir_all(workspace.join("src")).unwrap();
+    run_git(temporary.path(), &["init", workspace.to_str().unwrap()]);
+    fs::write(workspace.join("src/lib.rs"), "pub struct OriginalSymbol;\n").unwrap();
+    run_git(&workspace, &["add", "src/lib.rs"]);
+
+    let output = cfind_command(&workspace, &index_path)
+        .arg("OriginalSymbol")
+        .env("CFIND_WARN_AFTER_HOURS", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    fs::write(workspace.join("src/lib.rs"), "pub struct UpdatedSymbol;\n").unwrap();
+
+    set_index_creation_age(&index_path, 60 * 60 + 1);
+    let output = cfind_command(&workspace, &index_path)
+        .arg("OriginalSymbol")
+        .env("CFIND_WARN_AFTER_HOURS", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("OriginalSymbol"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("older than 1 hour"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    set_index_creation_age(&index_path, 3 * 60 * 60 + 1);
+    let output = cfind_command(&workspace, &index_path)
+        .arg("UpdatedSymbol")
+        .env("CFIND_WARN_AFTER_HOURS", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("UpdatedSymbol"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("automatic rebuild threshold"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -327,8 +444,24 @@ fn cfind_command(workspace: &Path, index_path: &Path) -> Command {
     command
         .current_dir(workspace)
         .env("CFIND_ROOT", workspace)
-        .env("CFIND_INDEX", index_path);
+        .env("CFIND_INDEX", index_path)
+        .env_remove("CFIND_WARN_AFTER_HOURS");
     command
+}
+
+fn set_index_creation_age(index_path: &Path, age_seconds: u64) {
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - age_seconds;
+    let database = open_database(index_path).unwrap();
+    database
+        .execute(
+            "UPDATE index_metadata SET value = ?1 WHERE key = 'created_at'",
+            [created_at],
+        )
+        .unwrap();
 }
 
 fn run_git(directory: &Path, arguments: &[&str]) {

@@ -21,6 +21,7 @@ Configuration is environment-based:
 export CFIND_ROOT="$HOME/code"
 export CFIND_LANGUAGES="rust,javascript,typescript,csharp"
 export CFIND_FETCH_STALE_DAYS=3
+export CFIND_WARN_AFTER_HOURS=6
 ```
 
 `CFIND_ROOT` is required; the tool exits without creating or opening an
@@ -56,6 +57,10 @@ last fetch is older than that threshold, whose current branch is not the cached
 origin default branch, or whose fetch state is unknown include a compact
 `local-state(...)` suffix. Fresh results include no state suffix. Set the value
 to `0` to disable Git-state collection and output.
+
+`CFIND_WARN_AFTER_HOURS` defaults to `6`. Searches warn when the index is older
+than that period and automatically rebuild it when it is more than three times
+that age (18 hours with the default).
 
 ## Use
 
@@ -98,11 +103,11 @@ C# namespace declarations are indexed as searchable `namespace` symbols.
 Containing namespaces are stored on other C# symbols and included in output
 with `--verbose`.
 
-Indexing is incremental. Git blob IDs identify unchanged files, tracked files
-with uncommitted changes are re-parsed, changed files are parsed in parallel,
-and all symbol updates are committed in batched SQLite transactions. Each index
-stores the CLI version that created it; a version mismatch automatically forces
-a complete re-index before searching.
+Indexing builds a fresh SQLite database beside the current index, parses tracked
+source files in parallel, and replaces the old index only after the new one is
+complete. Each index records its canonical root, normalized language set,
+format version, and creation time. A configuration or version mismatch
+automatically triggers a fresh rebuild before searching.
 
 Search ranking prioritizes exact names. If multiple symbols have the exact same
 name, the result with the shortest directory distance from `--from` (the current
@@ -116,6 +121,6 @@ GitHub and GitLab links use the repository's default or tracked branch to keep
 normal output compact. Pass `--commit-url` to prefer an immutable URL using the
 commit that was current during indexing; it falls back to the branch URL when a
 commit URL is unavailable. URLs are omitted when neither form is available.
-Re-run `cfind --index` after changing branches or commits to refresh links
-and symbols. Searches also print a warning with the re-index command when the
-last successful indexing run was more than one day ago.
+Re-run `cfind --index` after changing branches or commits to refresh links and
+symbols immediately. The configured age policy otherwise warns and eventually
+rebuilds the index automatically.
