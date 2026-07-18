@@ -36,6 +36,11 @@ fn help_documents_required_environment_and_path_filters() {
         "{stdout}"
     );
     assert!(stdout.contains("--commit-url"), "{stdout}");
+    assert!(
+        stdout.contains("CODE_SEARCH_FETCH_STALE_DAYS=3"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("0 disables Git state"), "{stdout}");
 }
 
 #[test]
@@ -68,6 +73,7 @@ fn search_creates_a_missing_index_and_then_returns_results() {
         "pub struct AutoIndexedSymbol;\n",
     )
     .unwrap();
+    run_git(&workspace, &["add", "src/lib.rs"]);
 
     let output = code_search_command(&workspace, &index_path)
         .arg("AutoIndexedSymbol")
@@ -137,6 +143,18 @@ fn branch_urls_are_default_and_commit_urls_are_opt_in() {
         &workspace,
         &["remote", "add", "origin", "git@github.com:acme/example.git"],
     );
+    run_git(
+        &workspace,
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+    );
+    run_git(
+        &workspace,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    );
 
     let output = code_search_command(&workspace, &index_path)
         .arg("RemoteSymbol")
@@ -145,6 +163,7 @@ fn branch_urls_are_default_and_commit_urls_are_opt_in() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("RemoteSymbol"), "{stdout}");
+    assert!(!stdout.contains("local-state("), "{stdout}");
     assert!(
         stdout.contains("https://github.com/acme/example/blob/main/src/lib.rs"),
         "{stdout}"
@@ -165,12 +184,14 @@ fn branch_urls_are_default_and_commit_urls_are_opt_in() {
 
     let output = code_search_command(&workspace, &index_path)
         .args(["RemoteSymbol", "--commit-url", "--quiet"])
+        .env("CODE_SEARCH_FETCH_STALE_DAYS", "0")
         .output()
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("RemoteSymbol"), "{stdout}");
     assert!(!stdout.contains("https://"), "{stdout}");
+    assert!(!stdout.contains("local-state("), "{stdout}");
 }
 
 #[test]
@@ -190,6 +211,7 @@ fn search_filters_results_by_path_regex() {
         "namespace Acme.Data;\npublic class SharedSymbol {}\n",
     )
     .unwrap();
+    run_git(&workspace, &["add", "src/shared.rs", "src/Shared.cs"]);
 
     let output = code_search_command(&workspace, &index_path)
         .args(["SharedSymbol", "--filter", r"\.cs$"])

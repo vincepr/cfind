@@ -1,8 +1,10 @@
 use std::{
     collections::HashSet,
     ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
     process::Command,
+    time::UNIX_EPOCH,
 };
 
 use anyhow::{Context, Result, bail};
@@ -14,6 +16,10 @@ pub struct Repository {
     pub remote: Option<String>,
     pub revision: String,
     pub branch: Option<String>,
+    pub origin_branch: Option<String>,
+    pub current_branch: Option<String>,
+    pub last_fetch_at: Option<u64>,
+    pub git_state_collected: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -27,7 +33,7 @@ fn is_git_metadata(entry: &DirEntry) -> bool {
     entry.file_name() == OsStr::new(".git")
 }
 
-pub fn discover_repositories(root: &Path) -> Result<Vec<Repository>> {
+pub fn discover_repositories(root: &Path, collect_git_state: bool) -> Result<Vec<Repository>> {
     let mut roots = HashSet::new();
 
     if git_output(root, &["rev-parse", "--show-toplevel"]).is_ok() {
@@ -70,12 +76,31 @@ pub fn discover_repositories(root: &Path) -> Result<Vec<Repository>> {
                 .ok()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty());
-            let branch = remote_branch(&repo_root);
+            let origin_branch = origin_branch(&repo_root);
+            let tracked_branch = origin_branch
+                .is_none()
+                .then(|| tracked_branch(&repo_root))
+                .flatten();
+            let mut current_branch = None;
+            if collect_git_state || (origin_branch.is_none() && tracked_branch.is_none()) {
+                current_branch = current_branch_name(&repo_root);
+            }
+            let branch = origin_branch
+                .clone()
+                .or(tracked_branch)
+                .or_else(|| current_branch.clone());
+            let last_fetch_at = collect_git_state
+                .then(|| last_fetch_at(&repo_root))
+                .flatten();
             Ok(Repository {
                 root: repo_root,
                 remote,
                 revision,
                 branch,
+                origin_branch,
+                current_branch: collect_git_state.then_some(current_branch).flatten(),
+                last_fetch_at,
+                git_state_collected: collect_git_state,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -83,7 +108,7 @@ pub fn discover_repositories(root: &Path) -> Result<Vec<Repository>> {
     Ok(repositories)
 }
 
-fn remote_branch(repository: &Path) -> Option<String> {
+fn origin_branch(repository: &Path) -> Option<String> {
     let origin_head = git_output(
         repository,
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -94,7 +119,27 @@ fn remote_branch(repository: &Path) -> Option<String> {
         return origin_head;
     }
 
-    let upstream = git_output(
+    git_output(
+        repository,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/remotes/origin/main",
+            "refs/remotes/origin/master",
+        ],
+    )
+    .ok()
+    .and_then(|branches| {
+        branches
+            .lines()
+            .next()
+            .and_then(|branch| branch.strip_prefix("origin/"))
+            .map(str::to_owned)
+    })
+}
+
+fn tracked_branch(repository: &Path) -> Option<String> {
+    git_output(
         repository,
         &[
             "rev-parse",
@@ -104,15 +149,40 @@ fn remote_branch(repository: &Path) -> Option<String> {
         ],
     )
     .ok()
-    .and_then(|branch| branch.trim().strip_prefix("origin/").map(str::to_owned));
-    if upstream.is_some() {
-        return upstream;
-    }
+    .and_then(|branch| branch.trim().strip_prefix("origin/").map(str::to_owned))
+}
 
+fn current_branch_name(repository: &Path) -> Option<String> {
     git_output(repository, &["symbolic-ref", "--short", "HEAD"])
         .ok()
         .map(|branch| branch.trim().to_owned())
         .filter(|branch| !branch.is_empty())
+}
+
+fn last_fetch_at(repository: &Path) -> Option<u64> {
+    git_metadata_time(repository, "FETCH_HEAD")
+        // A clone creates the cached origin refs without creating FETCH_HEAD.
+        // origin/HEAD's timestamp is therefore the best local clone-time
+        // fallback until the first explicit fetch.
+        .or_else(|| git_metadata_time(repository, "refs/remotes/origin/HEAD"))
+}
+
+fn git_metadata_time(repository: &Path, git_path: &str) -> Option<u64> {
+    let path = git_output(repository, &["rev-parse", "--git-path", git_path])
+        .ok()
+        .map(|path| PathBuf::from(path.trim()))?;
+    let path = if path.is_absolute() {
+        path
+    } else {
+        repository.join(path)
+    };
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
 }
 
 pub fn tracked_files(repository: &Repository) -> Result<Vec<TrackedFile>> {
@@ -147,31 +217,6 @@ pub fn tracked_files(repository: &Repository) -> Result<Vec<TrackedFile>> {
                 path: path.to_owned(),
                 blob_id: blob_id.to_owned(),
                 dirty: dirty_paths.contains(path),
-            });
-        }
-    }
-    if repository.revision.is_empty() {
-        let indexed_paths = files
-            .iter()
-            .map(|file| file.path.clone())
-            .collect::<HashSet<_>>();
-        let untracked = git_output_bytes(
-            &repository.root,
-            &["ls-files", "--others", "--exclude-standard", "-z"],
-        )?;
-        for path in untracked
-            .split(|byte| *byte == 0)
-            .filter(|path| !path.is_empty())
-        {
-            let path = String::from_utf8_lossy(path).into_owned();
-            if indexed_paths.contains(path.as_str()) {
-                continue;
-            }
-            let blob_id = git_output(&repository.root, &["hash-object", "--", &path])?;
-            files.push(TrackedFile {
-                path,
-                blob_id: blob_id.trim().to_owned(),
-                dirty: true,
             });
         }
     }

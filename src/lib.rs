@@ -31,4 +31,5 @@ pub struct SearchResult {
     pub end_line: usize,
     pub remote_url: Option<String>,
     pub commit_url: Option<String>,
+    pub git_state: Option<String>,
 }

@@ -9,6 +9,8 @@ use anyhow::{Context, Result, bail};
 pub const ROOT_ENV: &str = "CODE_SEARCH_ROOT";
 pub const LANGUAGES_ENV: &str = "CODE_SEARCH_LANGUAGES";
 pub const INDEX_ENV: &str = "CODE_SEARCH_INDEX";
+pub const FETCH_STALE_DAYS_ENV: &str = "CODE_SEARCH_FETCH_STALE_DAYS";
+const DEFAULT_FETCH_STALE_DAYS: u64 = 3;
 #[cfg(not(target_os = "windows"))]
 const ROOT_REQUIRED_MESSAGE: &str = "CODE_SEARCH_ROOT is required; set it to the directory containing your repositories, for example: export CODE_SEARCH_ROOT=\"$HOME/code\"";
 #[cfg(target_os = "windows")]
@@ -60,6 +62,7 @@ pub struct Config {
     pub root: PathBuf,
     pub index_path: PathBuf,
     pub languages: HashSet<SupportedLanguage>,
+    pub fetch_stale_days: u64,
 }
 
 impl Config {
@@ -89,11 +92,19 @@ impl Config {
             Some(path) => PathBuf::from(path),
             None => default_index_path(&root)?,
         };
+        let fetch_stale_days = env::var(FETCH_STALE_DAYS_ENV)
+            .map(|value| {
+                value.parse::<u64>().with_context(|| {
+                    format!("{FETCH_STALE_DAYS_ENV} must be a non-negative number of days")
+                })
+            })
+            .unwrap_or(Ok(DEFAULT_FETCH_STALE_DAYS))?;
 
         Ok(Self {
             root,
             index_path,
             languages,
+            fetch_stale_days,
         })
     }
 }

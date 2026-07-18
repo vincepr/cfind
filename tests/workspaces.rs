@@ -91,7 +91,7 @@ fn reindexes_uncommitted_changes_to_tracked_files() {
 }
 
 #[test]
-fn index_format_upgrade_reparses_unchanged_files() {
+fn cli_version_change_reparses_unchanged_files() {
     let temporary = TempDir::new().unwrap();
     let workspace = temporary.path().join("workspace");
     create_repository(
@@ -108,7 +108,7 @@ fn index_format_upgrade_reparses_unchanged_files() {
         .unwrap();
     database
         .execute(
-            "DELETE FROM index_metadata WHERE key = 'format_version'",
+            "UPDATE index_metadata SET value = '0.0.0' WHERE key = 'cli_version'",
             [],
         )
         .unwrap();
@@ -126,6 +126,7 @@ fn config(root: &Path, language: SupportedLanguage) -> Config {
         root: root.to_path_buf(),
         index_path: root.join(".code-search.sqlite3"),
         languages: HashSet::from([language]),
+        fetch_stale_days: 3,
     }
 }
 

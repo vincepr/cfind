@@ -12,7 +12,7 @@ use code_search::{
 #[command(
     version,
     about = "Local code symbol search",
-    after_help = "Examples:\n  code-search DatabaseContext\n  code-search GzipDecompress -f '\\.cs$'\n  code-search --type\n  code-search --index\n  code-search --status\n\nEnvironment:\n  CODE_SEARCH_ROOT=/path/to/code                         Required repository directory\n  CODE_SEARCH_INDEX=/path/to/index.sqlite                Optional exact database path\n  CODE_SEARCH_LANGUAGES=rust,javascript,typescript,csharp Optional languages (default: all)"
+    after_help = "Examples:\n  code-search DatabaseContext\n  code-search GzipDecompress -f '\\.cs$'\n  code-search --type\n  code-search --index\n  code-search --status\n\nEnvironment:\n  CODE_SEARCH_ROOT=/path/to/code                         Required repository directory\n  CODE_SEARCH_INDEX=/path/to/index.sqlite                Optional exact database path\n  CODE_SEARCH_LANGUAGES=rust,javascript,typescript,csharp Optional languages (default: all)\n  CODE_SEARCH_FETCH_STALE_DAYS=3                          Fetch-age threshold; 0 disables Git state"
 )]
 struct Cli {
     /// Symbol name (fuzzy matching supported).
@@ -116,6 +116,7 @@ fn run() -> Result<()> {
         cli.limit,
         cli.filter.as_deref(),
         symbol_type.as_deref(),
+        (config.fetch_stale_days > 0).then_some(config.fetch_stale_days),
     )?;
     for result in results {
         let parent = result
@@ -123,12 +124,18 @@ fn run() -> Result<()> {
             .as_deref()
             .map(|parent| format!(" in {parent}"))
             .unwrap_or_default();
+        let git_state = result
+            .git_state
+            .as_deref()
+            .map(|state| format!(" {state}"))
+            .unwrap_or_default();
         println!(
-            "{}  {}{}  {}\n  {}:{}",
+            "{}  {}{}  {}{}\n  {}:{}",
             result.kind,
             result.name,
             parent,
             result.match_score,
+            git_state,
             result.local_path.display(),
             result.start_line
         );

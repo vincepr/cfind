@@ -1,4 +1,8 @@
-use std::{cmp::Ordering, path::Path};
+use std::{
+    cmp::Ordering,
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -23,7 +27,7 @@ pub fn search(
     from: &Path,
     limit: usize,
 ) -> Result<Vec<SearchResult>> {
-    search_filtered(connection, query, from, limit, None, None)
+    search_filtered(connection, query, from, limit, None, None, None)
 }
 
 pub fn distinct_symbol_kinds(connection: &Connection) -> Result<Vec<String>> {
@@ -41,6 +45,7 @@ pub fn search_filtered(
     limit: usize,
     path_filter: Option<&str>,
     symbol_kind: Option<&str>,
+    fetch_stale_days: Option<u64>,
 ) -> Result<Vec<SearchResult>> {
     let query_normalized = query.to_ascii_lowercase();
     let path_filter = path_filter
@@ -49,7 +54,9 @@ pub fn search_filtered(
         .context("invalid --filter regex")?;
     let mut statement = connection.prepare(
         "SELECT s.name, s.kind, s.parent, s.namespace, s.start_line, s.end_line,
-                f.path, r.root, r.remote, r.revision, r.branch
+                f.path, r.root, r.remote, r.revision, r.branch,
+                r.origin_branch, r.current_branch, r.last_fetch_at,
+                r.git_state_collected
          FROM symbols s
          JOIN files f ON f.id = s.file_id
          JOIN repositories r ON r.id = f.repository_id",
@@ -67,6 +74,10 @@ pub fn search_filtered(
             row.get::<_, Option<String>>(8)?,
             row.get::<_, String>(9)?,
             row.get::<_, Option<String>>(10)?,
+            row.get::<_, Option<String>>(11)?,
+            row.get::<_, Option<String>>(12)?,
+            row.get::<_, Option<u64>>(13)?,
+            row.get::<_, bool>(14)?,
         ))
     })?;
 
@@ -84,6 +95,10 @@ pub fn search_filtered(
             remote,
             revision,
             branch,
+            origin_branch,
+            current_branch,
+            last_fetch_at,
+            git_state_collected,
         ) = row?;
         if symbol_kind.is_some_and(|filter| kind != filter) {
             continue;
@@ -131,6 +146,16 @@ pub fn search_filtered(
                     start_line,
                     end_line,
                 ),
+                git_state: fetch_stale_days.and_then(|days| {
+                    stale_git_state(
+                        remote.as_deref(),
+                        origin_branch.as_deref(),
+                        current_branch.as_deref(),
+                        last_fetch_at,
+                        days,
+                        git_state_collected,
+                    )
+                }),
             },
             exactness,
             similarity,
@@ -142,6 +167,40 @@ pub fn search_filtered(
         .take(limit)
         .map(|item| item.result)
         .collect())
+}
+
+fn stale_git_state(
+    remote: Option<&str>,
+    origin_branch: Option<&str>,
+    current_branch: Option<&str>,
+    last_fetch_at: Option<u64>,
+    stale_days: u64,
+    collected: bool,
+) -> Option<String> {
+    if !collected || remote.is_none() || stale_days == 0 {
+        return None;
+    }
+    let mut reasons = Vec::new();
+    match (current_branch, origin_branch) {
+        (Some(current), Some(origin)) if current == origin => {}
+        (_, Some(_)) => reasons.push("not-origin-branch".to_owned()),
+        (_, None) => reasons.push("origin-branch-unknown".to_owned()),
+    }
+
+    match last_fetch_at {
+        Some(fetched_at) => {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(fetched_at, |duration| duration.as_secs());
+            let age_seconds = now.saturating_sub(fetched_at);
+            if age_seconds > stale_days.saturating_mul(24 * 60 * 60) {
+                reasons.push(format!("fetch>{}d", age_seconds / (24 * 60 * 60)));
+            }
+        }
+        None => reasons.push("fetch-unknown".to_owned()),
+    }
+
+    (!reasons.is_empty()).then(|| format!("local-state({})", reasons.join(",")))
 }
 
 fn compare_ranked(left: &RankedResult, right: &RankedResult) -> Ordering {
@@ -223,5 +282,46 @@ mod tests {
         let filter = Regex::new(r"\.cs$").unwrap();
         assert!(filter.is_match("algorithms/Deflate/GzipDecompress.cs"));
         assert!(!filter.is_match("src/search.rs"));
+    }
+
+    #[test]
+    fn git_state_is_only_returned_when_stale() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(
+            stale_git_state(
+                Some("git@example.com:acme/shop.git"),
+                Some("main"),
+                Some("main"),
+                Some(now - 2 * 24 * 60 * 60),
+                3,
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            stale_git_state(
+                Some("git@example.com:acme/shop.git"),
+                Some("main"),
+                Some("feature/payments"),
+                Some(now - 5 * 24 * 60 * 60),
+                3,
+                true,
+            ),
+            Some("local-state(not-origin-branch,fetch>5d)".to_owned())
+        );
+        assert_eq!(
+            stale_git_state(
+                Some("git@example.com:acme/shop.git"),
+                Some("main"),
+                Some("feature/payments"),
+                None,
+                0,
+                false,
+            ),
+            None
+        );
     }
 }

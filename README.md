@@ -6,8 +6,6 @@ locations and commit-pinned GitHub or GitLab links.
 
 Only files reported by `git ls-files` are indexed. Ignored dependencies, build
 outputs, and other untracked files are excluded automatically.
-In a newly initialized repository with no first commit, non-ignored working-tree
-files are indexed so the repository can be searched before its initial commit.
 
 ## Install
 
@@ -22,6 +20,7 @@ Configuration is environment-based:
 ```bash
 export CODE_SEARCH_ROOT="$HOME/code"
 export CODE_SEARCH_LANGUAGES="rust,javascript,typescript,csharp"
+export CODE_SEARCH_FETCH_STALE_DAYS=3
 ```
 
 `CODE_SEARCH_ROOT` is required; the tool exits without creating or opening an
@@ -51,6 +50,12 @@ CODE_SEARCH_ROOT="$HOME/code" code-search DatabaseContext
 Set `CODE_SEARCH_INDEX` to override the database path explicitly.
 
 Language aliases such as `rs`, `js`, `ts`, `cs`, and `c#` are accepted.
+
+`CODE_SEARCH_FETCH_STALE_DAYS` defaults to `3`. Results from a repository whose
+last fetch is older than that threshold, whose current branch is not the cached
+origin default branch, or whose fetch state is unknown include a compact
+`local-state(...)` suffix. Fresh results include no state suffix. Set the value
+to `0` to disable Git-state collection and output.
 
 ## Use
 
@@ -94,7 +99,9 @@ with `--verbose`.
 
 Indexing is incremental. Git blob IDs identify unchanged files, tracked files
 with uncommitted changes are re-parsed, changed files are parsed in parallel,
-and all symbol updates are committed in batched SQLite transactions.
+and all symbol updates are committed in batched SQLite transactions. Each index
+stores the CLI version that created it; a version mismatch automatically forces
+a complete re-index before searching.
 
 Search ranking prioritizes exact names. If multiple symbols have the exact same
 name, the result with the shortest directory distance from `--from` (the current

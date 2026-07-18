@@ -27,7 +27,8 @@ pub struct IndexStats {
 }
 
 pub const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
-const INDEX_FORMAT_VERSION: u64 = 2;
+const INDEX_FORMAT_VERSION: u64 = 4;
+const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 struct ParsedFile {
     path: String,
@@ -52,7 +53,11 @@ pub fn open_database(path: &Path) -> Result<Connection> {
              root TEXT NOT NULL UNIQUE,
              remote TEXT,
              revision TEXT NOT NULL,
-             branch TEXT
+             branch TEXT,
+             origin_branch TEXT,
+             current_branch TEXT,
+             last_fetch_at INTEGER,
+             git_state_collected INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE IF NOT EXISTS files (
              id INTEGER PRIMARY KEY,
@@ -83,8 +88,30 @@ pub fn open_database(path: &Path) -> Result<Connection> {
          );",
     )?;
     ensure_repository_branch_column(&connection)?;
+    ensure_repository_state_columns(&connection)?;
     ensure_symbol_namespace_column(&connection)?;
     Ok(connection)
+}
+
+fn ensure_repository_state_columns(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(repositories)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    for (column, sql_type) in [
+        ("origin_branch", "TEXT"),
+        ("current_branch", "TEXT"),
+        ("last_fetch_at", "INTEGER"),
+        ("git_state_collected", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !columns.contains(column) {
+            connection.execute(
+                &format!("ALTER TABLE repositories ADD COLUMN {column} {sql_type}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn ensure_repository_branch_column(connection: &Connection) -> Result<()> {
@@ -111,9 +138,9 @@ fn ensure_symbol_namespace_column(connection: &Connection) -> Result<()> {
 
 pub fn rebuild(config: &Config) -> Result<IndexStats> {
     let started = Instant::now();
-    let repositories = discover_repositories(&config.root)?;
+    let repositories = discover_repositories(&config.root, config.fetch_stale_days > 0)?;
     let mut connection = open_database(&config.index_path)?;
-    if index_format_version(&connection)? != Some(INDEX_FORMAT_VERSION) {
+    if !index_versions_match(&connection)? {
         // Schema-derived fields may need data that cannot be reconstructed by
         // ALTER TABLE. Invalidate blob IDs so every file is parsed once.
         connection.execute("UPDATE files SET blob_id = ''", [])?;
@@ -150,6 +177,11 @@ fn record_index_completion(connection: &Connection) -> Result<()> {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         [INDEX_FORMAT_VERSION],
     )?;
+    connection.execute(
+        "INSERT INTO index_metadata(key, value) VALUES ('cli_version', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [CLI_VERSION],
+    )?;
     Ok(())
 }
 
@@ -162,6 +194,24 @@ fn index_format_version(connection: &Connection) -> Result<Option<u64>> {
         )
         .optional()
         .map_err(Into::into)
+}
+
+fn index_cli_version(connection: &Connection) -> Result<Option<String>> {
+    connection
+        .query_row(
+            "SELECT value FROM index_metadata WHERE key = 'cli_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn index_versions_match(connection: &Connection) -> Result<bool> {
+    Ok(
+        index_format_version(connection)? == Some(INDEX_FORMAT_VERSION)
+            && index_cli_version(connection)?.as_deref() == Some(CLI_VERSION),
+    )
 }
 
 pub fn index_is_stale(connection: &Connection) -> Result<bool> {
@@ -201,13 +251,27 @@ fn index_repository(
 
     let root = repository.root.to_string_lossy().into_owned();
     connection.execute(
-        "INSERT INTO repositories(root, remote, revision, branch) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(root) DO UPDATE SET remote = excluded.remote, revision = excluded.revision, branch = excluded.branch",
+        "INSERT INTO repositories(
+             root, remote, revision, branch, origin_branch, current_branch,
+             last_fetch_at, git_state_collected
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(root) DO UPDATE SET
+             remote = excluded.remote,
+             revision = excluded.revision,
+             branch = excluded.branch,
+             origin_branch = excluded.origin_branch,
+             current_branch = excluded.current_branch,
+             last_fetch_at = excluded.last_fetch_at,
+             git_state_collected = excluded.git_state_collected",
         params![
             root,
             repository.remote,
             repository.revision,
-            repository.branch
+            repository.branch,
+            repository.origin_branch,
+            repository.current_branch,
+            repository.last_fetch_at,
+            repository.git_state_collected,
         ],
     )?;
     let repository_id: i64 = connection.query_row(
@@ -369,7 +433,7 @@ pub fn index_exists(path: &Path) -> Result<bool> {
     if !completed {
         return Ok(false);
     }
-    Ok(index_format_version(&connection)? == Some(INDEX_FORMAT_VERSION))
+    index_versions_match(&connection)
 }
 
 #[cfg(test)]
@@ -432,6 +496,10 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(columns.iter().any(|column| column == "branch"));
+        assert!(columns.iter().any(|column| column == "origin_branch"));
+        assert!(columns.iter().any(|column| column == "current_branch"));
+        assert!(columns.iter().any(|column| column == "last_fetch_at"));
+        assert!(columns.iter().any(|column| column == "git_state_collected"));
         let mut statement = connection.prepare("PRAGMA table_info(symbols)").unwrap();
         let columns = statement
             .query_map([], |row| row.get::<_, String>(1))
@@ -452,6 +520,15 @@ mod tests {
         connection
             .execute(
                 "DELETE FROM index_metadata WHERE key = 'format_version'",
+                [],
+            )
+            .unwrap();
+        assert!(!index_exists(&temporary.path().join("index.sqlite3")).unwrap());
+
+        record_index_completion(&connection).unwrap();
+        connection
+            .execute(
+                "UPDATE index_metadata SET value = '0.0.0' WHERE key = 'cli_version'",
                 [],
             )
             .unwrap();
