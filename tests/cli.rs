@@ -212,6 +212,10 @@ fn search_filters_results_by_path_regex() {
     )
     .unwrap();
     run_git(&workspace, &["add", "src/shared.rs", "src/Shared.cs"]);
+    run_git(
+        &workspace,
+        &["remote", "add", "origin", "git@github.com:acme/shared.git"],
+    );
 
     let output = code_search_command(&workspace, &index_path)
         .args(["SharedSymbol", "--filter", r"\.cs$"])
@@ -221,6 +225,7 @@ fn search_filters_results_by_path_regex() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("src/Shared.cs"), "{stdout}");
     assert!(!stdout.contains("src/shared.rs"), "{stdout}");
+    assert!(stdout.ends_with("\n\n"), "{stdout}");
 
     let output = code_search_command(&workspace, &index_path)
         .arg("--type")
@@ -247,7 +252,12 @@ fn search_filters_results_by_path_regex() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("namespace Acme.Data"), "{stdout}");
+    assert!(!stdout.contains("namespace Acme.Data"), "{stdout}");
+    assert!(stdout.contains("\n  Acme.Data\n\n"), "{stdout}");
+    let path = stdout.find("src/Shared.cs:2").unwrap();
+    let url = stdout.find("https://github.com/acme/shared/").unwrap();
+    let namespace = stdout.rfind("\n  Acme.Data").unwrap();
+    assert!(path < url && url < namespace, "{stdout}");
 
     let output = code_search_command(&workspace, &index_path)
         .args(["Acme.Data", "--type", "namespace"])

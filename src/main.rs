@@ -139,11 +139,6 @@ fn run() -> Result<()> {
             result.local_path.display(),
             result.start_line
         );
-        if cli.verbose
-            && let Some(namespace) = result.namespace.as_deref()
-        {
-            println!("  namespace {namespace}");
-        }
         let url = if cli.quiet {
             None
         } else if cli.commit_url {
@@ -154,6 +149,12 @@ fn run() -> Result<()> {
         if let Some(url) = url {
             println!("  {url}");
         }
+        if cli.verbose
+            && let Some(namespace) = result.namespace.as_deref()
+        {
+            println!("  {namespace}");
+        }
+        println!();
     }
     Ok(())
 }
