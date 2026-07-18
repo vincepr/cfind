@@ -27,7 +27,7 @@ pub struct IndexStats {
 }
 
 pub const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
-const INDEX_FORMAT_VERSION: u64 = 4;
+const INDEX_FORMAT_VERSION: u64 = 5;
 const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 struct ParsedFile {
@@ -38,7 +38,9 @@ struct ParsedFile {
 }
 
 pub fn open_database(path: &Path) -> Result<Connection> {
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
         fs::create_dir_all(parent)
             .with_context(|| format!("could not create index directory {}", parent.display()))?;
     }
@@ -140,6 +142,7 @@ pub fn rebuild(config: &Config) -> Result<IndexStats> {
     let started = Instant::now();
     let repositories = discover_repositories(&config.root, config.fetch_stale_days > 0)?;
     let mut connection = open_database(&config.index_path)?;
+    mark_index_incomplete(&connection)?;
     if !index_versions_match(&connection)? {
         // Schema-derived fields may need data that cannot be reconstructed by
         // ALTER TABLE. Invalidate blob IDs so every file is parsed once.
@@ -157,12 +160,18 @@ pub fn rebuild(config: &Config) -> Result<IndexStats> {
     remove_missing_repositories(&connection, &config.root, &active_roots)?;
 
     for repository in &repositories {
-        index_repository(&mut connection, repository, config, &mut stats)?;
+        index_repository(&mut connection, repository, config, &mut stats)
+            .with_context(|| format!("could not index repository {}", repository.root.display()))?;
     }
     stats.symbols = connection.query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get(0))?;
     record_index_completion(&connection)?;
     stats.elapsed_ms = started.elapsed().as_millis();
     Ok(stats)
+}
+
+fn mark_index_incomplete(connection: &Connection) -> Result<()> {
+    connection.execute("DELETE FROM index_metadata WHERE key = 'completed_at'", [])?;
+    Ok(())
 }
 
 fn record_index_completion(connection: &Connection) -> Result<()> {
@@ -547,6 +556,20 @@ mod tests {
             )
             .unwrap();
 
+        assert!(index_is_stale(&connection).unwrap());
+    }
+
+    #[test]
+    fn an_in_progress_rebuild_is_not_a_valid_index() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let path = temporary.path().join("index.sqlite");
+        let connection = open_database(&path).unwrap();
+        record_index_completion(&connection).unwrap();
+        assert!(index_exists(&path).unwrap());
+
+        mark_index_incomplete(&connection).unwrap();
+
+        assert!(!index_exists(&path).unwrap());
         assert!(index_is_stale(&connection).unwrap());
     }
 }

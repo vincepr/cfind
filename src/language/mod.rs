@@ -68,7 +68,11 @@ pub(crate) fn language_from_alias(value: &str) -> Option<SupportedLanguage> {
 }
 
 pub(crate) fn language_from_path(path: &Path) -> Option<SupportedLanguage> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    language_from_extension(path.extension()?.to_str()?)
+}
+
+pub(crate) fn language_from_extension(extension: &str) -> Option<SupportedLanguage> {
+    let extension = extension.to_ascii_lowercase();
     SupportedLanguage::ALL.into_iter().find(|language| {
         adapter(*language)
             .extensions()

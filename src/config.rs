@@ -37,6 +37,10 @@ impl SupportedLanguage {
         crate::language::language_from_path(path)
     }
 
+    pub(crate) fn from_extension(extension: &str) -> Option<Self> {
+        crate::language::language_from_extension(extension)
+    }
+
     pub fn as_str(self) -> &'static str {
         crate::language::language_name(self)
     }
@@ -59,6 +63,9 @@ impl Config {
         let root = root
             .canonicalize()
             .with_context(|| format!("search root does not exist: {}", root.display()))?;
+        if !root.is_dir() {
+            bail!("search root is not a directory: {}", root.display());
+        }
 
         let language_value = env::var(LANGUAGES_ENV)
             .unwrap_or_else(|_| "rust,javascript,typescript,csharp".to_owned());
@@ -74,7 +81,8 @@ impl Config {
         }
 
         let index_path = match env::var_os(INDEX_ENV) {
-            Some(path) => PathBuf::from(path),
+            Some(path) if !path.is_empty() => PathBuf::from(path),
+            Some(_) => bail!("{INDEX_ENV} must not be empty"),
             None => default_index_path(&root)?,
         };
         let fetch_stale_days = env::var(FETCH_STALE_DAYS_ENV)

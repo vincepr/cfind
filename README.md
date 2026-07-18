@@ -2,7 +2,7 @@
 
 `cfind` is a local, Git-aware symbol indexer. It parses tracked Rust,
 JavaScript, TypeScript, and C# files with Tree-sitter and returns both local
-locations and commit-pinned GitHub or GitLab links.
+locations and compact branch-based GitHub or GitLab links.
 
 Only files reported by `git ls-files` are indexed. Ignored dependencies, build
 outputs, and other untracked files are excluded automatically.
@@ -80,7 +80,8 @@ refreshes the index silently before returning search results.
 If no index exists for the selected root, the tool reports the new database
 path, builds the index, and then continues with the requested search.
 Both automatic and explicit indexing report the database path before indexing
-starts.
+starts. Automatic indexing writes its progress to stderr so search stdout
+contains only results.
 
 Use `--filter` to restrict results by repository-relative file path using a
 regular expression. Quote the expression so the shell passes it unchanged. For

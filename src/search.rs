@@ -53,7 +53,8 @@ pub fn search_filtered(
         .transpose()
         .context("invalid --filter regex")?;
     let mut statement = connection.prepare(
-        "SELECT s.name, s.kind, s.parent, s.namespace, s.start_line, s.end_line,
+        "SELECT s.name, s.normalized_name, s.kind, s.parent, s.namespace,
+                s.start_line, s.end_line,
                 f.path, r.root, r.remote, r.revision, r.branch,
                 r.origin_branch, r.current_branch, r.last_fetch_at,
                 r.git_state_collected
@@ -65,19 +66,20 @@ pub fn search_filtered(
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
-            row.get::<_, Option<String>>(2)?,
+            row.get::<_, String>(2)?,
             row.get::<_, Option<String>>(3)?,
-            row.get::<_, usize>(4)?,
+            row.get::<_, Option<String>>(4)?,
             row.get::<_, usize>(5)?,
-            row.get::<_, String>(6)?,
+            row.get::<_, usize>(6)?,
             row.get::<_, String>(7)?,
-            row.get::<_, Option<String>>(8)?,
-            row.get::<_, String>(9)?,
-            row.get::<_, Option<String>>(10)?,
+            row.get::<_, String>(8)?,
+            row.get::<_, Option<String>>(9)?,
+            row.get::<_, String>(10)?,
             row.get::<_, Option<String>>(11)?,
             row.get::<_, Option<String>>(12)?,
-            row.get::<_, Option<u64>>(13)?,
-            row.get::<_, bool>(14)?,
+            row.get::<_, Option<String>>(13)?,
+            row.get::<_, Option<u64>>(14)?,
+            row.get::<_, bool>(15)?,
         ))
     })?;
 
@@ -85,6 +87,7 @@ pub fn search_filtered(
     for row in rows {
         let (
             name,
+            normalized,
             kind,
             parent,
             namespace,
@@ -109,7 +112,6 @@ pub fn search_filtered(
         {
             continue;
         }
-        let normalized = name.to_ascii_lowercase();
         let exactness = if normalized == query_normalized {
             3
         } else if normalized.starts_with(&query_normalized) {

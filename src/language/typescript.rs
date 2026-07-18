@@ -33,7 +33,9 @@ impl LanguageAdapter for TypeScriptAdapter {
             "interface_declaration" => "interface",
             "type_alias_declaration" => "type",
             "enum_declaration" => "enum",
-            "function_declaration" | "generator_function_declaration" => "function",
+            "function_declaration" | "generator_function_declaration" | "function_signature" => {
+                "function"
+            }
             "method_definition" | "method_signature" | "abstract_method_signature" => "method",
             "variable_declarator" => {
                 let value = node.child_by_field_name("value")?;
@@ -56,6 +58,7 @@ mod tests {
     fn extracts_interfaces_and_arrow_functions() {
         let source = br#"
             interface DatabaseEntity { id: number }
+            declare function createDatabase(): DatabaseEntity;
             const loadDatabase = () => 1;
         "#;
         let symbols = parse_source(source, SupportedLanguage::TypeScript).unwrap();
@@ -68,6 +71,11 @@ mod tests {
             symbols
                 .iter()
                 .any(|symbol| symbol.name == "loadDatabase" && symbol.kind == "function")
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|symbol| symbol.name == "createDatabase" && symbol.kind == "function")
         );
     }
 }

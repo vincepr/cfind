@@ -10,6 +10,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use walkdir::{DirEntry, WalkDir};
 
+use crate::config::SupportedLanguage;
+
 #[derive(Debug, Clone)]
 pub struct Repository {
     pub root: PathBuf,
@@ -36,8 +38,7 @@ fn is_git_metadata(entry: &DirEntry) -> bool {
 pub fn discover_repositories(root: &Path, collect_git_state: bool) -> Result<Vec<Repository>> {
     let mut roots = HashSet::new();
 
-    if git_output(root, &["rev-parse", "--show-toplevel"]).is_ok() {
-        let top = git_output(root, &["rev-parse", "--show-toplevel"])?;
+    if let Ok(top) = git_output(root, &["rev-parse", "--show-toplevel"]) {
         let top = PathBuf::from(top.trim());
         if top.starts_with(root) || root.starts_with(&top) {
             roots.insert(top);
@@ -48,8 +49,9 @@ pub fn discover_repositories(root: &Path, collect_git_state: bool) -> Result<Vec
         .follow_links(false)
         .into_iter()
         .filter_entry(|entry| !is_git_metadata(entry))
-        .filter_map(Result::ok)
     {
+        let entry = entry
+            .with_context(|| format!("could not inspect repositories under {}", root.display()))?;
         let path = entry.path();
         if path.join(".git").exists() {
             roots.insert(path.to_path_buf());
@@ -189,21 +191,27 @@ pub fn tracked_files(repository: &Repository) -> Result<Vec<TrackedFile>> {
     let dirty_paths = git_output_bytes(&repository.root, &["diff-files", "--name-only", "-z"])?
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8_lossy(path).into_owned())
-        .collect::<HashSet<_>>();
+        .map(|path| git_path(path, &repository.root))
+        .filter_map(Result::transpose)
+        .collect::<Result<HashSet<_>>>()?;
     let deleted_paths = git_output_bytes(&repository.root, &["ls-files", "--deleted", "-z"])?
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8_lossy(path).into_owned())
-        .collect::<HashSet<_>>();
+        .map(|path| git_path(path, &repository.root))
+        .filter_map(Result::transpose)
+        .collect::<Result<HashSet<_>>>()?;
     let output = git_output_bytes(&repository.root, &["ls-files", "-s", "-z"])?;
     let mut files = Vec::new();
     for entry in output
         .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty())
     {
-        let entry = String::from_utf8_lossy(entry);
-        let Some((metadata, path)) = entry.split_once('\t') else {
+        let Some(separator) = entry.iter().position(|byte| *byte == b'\t') else {
+            continue;
+        };
+        let metadata = std::str::from_utf8(&entry[..separator])
+            .context("git ls-files returned non-UTF-8 metadata")?;
+        let Some(path) = git_path(&entry[separator + 1..], &repository.root)? else {
             continue;
         };
         let mut fields = metadata.split_whitespace();
@@ -212,15 +220,34 @@ pub fn tracked_files(repository: &Repository) -> Result<Vec<TrackedFile>> {
             continue;
         };
         let stage = fields.next().unwrap_or("0");
-        if stage == "0" && !deleted_paths.contains(path) {
+        if stage == "0" && !deleted_paths.contains(&path) {
             files.push(TrackedFile {
-                path: path.to_owned(),
+                path: path.clone(),
                 blob_id: blob_id.to_owned(),
-                dirty: dirty_paths.contains(path),
+                dirty: dirty_paths.contains(&path),
             });
         }
     }
     Ok(files)
+}
+
+fn git_path(path: &[u8], repository: &Path) -> Result<Option<String>> {
+    match std::str::from_utf8(path) {
+        Ok(path) => Ok(Some(path.to_owned())),
+        Err(_) if has_supported_source_extension(path) => bail!(
+            "tracked source path is not valid UTF-8 in {}; cfind cannot index it",
+            repository.display()
+        ),
+        Err(_) => Ok(None),
+    }
+}
+
+fn has_supported_source_extension(path: &[u8]) -> bool {
+    let extension = path.rsplit(|byte| *byte == b'.').next().unwrap_or_default();
+    std::str::from_utf8(extension)
+        .ok()
+        .and_then(SupportedLanguage::from_extension)
+        .is_some()
 }
 
 pub fn remote_file_url(
@@ -310,16 +337,18 @@ fn normalize_remote(value: &str) -> Option<NormalizedRemote> {
 }
 
 fn percent_encode_segment(segment: &str) -> String {
-    segment
-        .bytes()
-        .flat_map(|byte| {
-            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-                vec![byte as char]
-            } else {
-                format!("%{byte:02X}").chars().collect()
-            }
-        })
-        .collect()
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
 }
 
 fn git_output(repository: &Path, args: &[&str]) -> Result<String> {
@@ -373,6 +402,21 @@ mod tests {
                 4
             ),
             Some("https://gitlab.com/acme/example/-/blob/abc123/src/lib.rs#L4".to_owned())
+        );
+    }
+
+    #[test]
+    fn rejects_non_utf8_git_paths() {
+        let error = git_path(b"src/invalid-\xff.rs", Path::new("/work/example")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("tracked source path is not valid UTF-8")
+        );
+        assert!(error.to_string().contains("/work/example"));
+        assert_eq!(
+            git_path(b"assets/invalid-\xff.png", Path::new("/work/example")).unwrap(),
+            None
         );
     }
 }

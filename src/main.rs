@@ -72,7 +72,7 @@ fn run() -> Result<()> {
     } else if !index_exists(&config.index_path)? {
         eprintln!("No index found.");
         eprintln!("Creating SQLite index at {}.", config.index_path.display());
-        run_index(&config)?;
+        run_automatic_index(&config)?;
     }
     let connection = open_database(&config.index_path)?;
     let kinds = distinct_symbol_kinds(&connection)?;
@@ -178,13 +178,28 @@ fn run_status(config: &Config) -> Result<()> {
 }
 
 fn run_index(config: &Config) -> Result<()> {
+    let stats = rebuild_with_progress(config)?;
+    println!("{}", index_summary(&stats));
+    Ok(())
+}
+
+fn run_automatic_index(config: &Config) -> Result<()> {
+    let stats = rebuild_with_progress(config)?;
+    eprintln!("{}", index_summary(&stats));
+    Ok(())
+}
+
+fn rebuild_with_progress(config: &Config) -> Result<cfind::index::IndexStats> {
     eprintln!(
         "Indexing {} and writing to {}.",
         config.root.display(),
         config.index_path.display()
     );
-    let stats = rebuild(config)?;
-    println!(
+    rebuild(config)
+}
+
+fn index_summary(stats: &cfind::index::IndexStats) -> String {
+    format!(
         "Indexed {} symbols from {} source files in {} repositories ({} parsed, {} unchanged) in {} ms.",
         stats.symbols,
         stats.tracked_source_files,
@@ -192,8 +207,7 @@ fn run_index(config: &Config) -> Result<()> {
         stats.parsed_files,
         stats.unchanged_files,
         stats.elapsed_ms
-    );
-    Ok(())
+    )
 }
 
 #[cfg(not(target_os = "windows"))]

@@ -76,12 +76,13 @@ fn search_creates_a_missing_index_and_then_returns_results() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stdout.contains("Indexed 1 symbols"), "{stdout}");
+    assert!(!stdout.contains("Indexed "), "{stdout}");
     assert!(stdout.contains("AutoIndexedSymbol"), "{stdout}");
     assert!(stdout.contains("10000"), "{stdout}");
     assert!(stderr.contains("No index found."), "{stderr}");
     assert!(stderr.contains("Creating SQLite index at"), "{stderr}");
     assert!(stderr.contains("Indexing"), "{stderr}");
+    assert!(stderr.contains("Indexed 1 symbols"), "{stderr}");
     assert!(
         stderr.contains(&index_path.display().to_string()),
         "{stderr}"
@@ -109,6 +110,53 @@ fn search_creates_a_missing_index_and_then_returns_results() {
     assert!(stdout.contains("AutoIndexedSymbol"), "{stdout}");
     assert!(!stdout.contains("Indexed "), "{stdout}");
     assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[test]
+fn invalid_configuration_fails_before_opening_the_index() {
+    let temporary = TempDir::new().unwrap();
+    let root_file = temporary.path().join("not-a-directory");
+    fs::write(&root_file, "not a repository root").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_cfind"))
+        .arg("Anything")
+        .env("CFIND_ROOT", &root_file)
+        .env(
+            "CFIND_INDEX",
+            temporary.path().join("must-not-exist.sqlite"),
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("search root is not a directory"),
+        "{stderr}"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cfind"))
+        .arg("Anything")
+        .env("CFIND_ROOT", temporary.path())
+        .env("CFIND_INDEX", "")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("CFIND_INDEX must not be empty"), "{stderr}");
+}
+
+#[test]
+fn relative_index_path_is_resolved_from_the_working_directory() {
+    let temporary = TempDir::new().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_cfind"))
+        .arg("--index")
+        .current_dir(temporary.path())
+        .env("CFIND_ROOT", temporary.path())
+        .env("CFIND_INDEX", "index.sqlite")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(temporary.path().join("index.sqlite").exists());
 }
 
 #[test]
