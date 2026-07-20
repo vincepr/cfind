@@ -64,6 +64,100 @@ fn missing_root_exits_without_creating_an_index() {
 }
 
 #[test]
+fn status_reports_a_missing_index_without_creating_it() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let index_path = temporary.path().join("indexes/workspace.sqlite");
+    fs::create_dir(&workspace).unwrap();
+
+    let output = cfind_command(&workspace, &index_path)
+        .arg("--status")
+        .env("CFIND_LANGUAGES", "rust")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("No index at {}\n", index_path.display())
+    );
+    assert!(output.stderr.is_empty());
+    assert!(!index_path.exists());
+}
+
+#[test]
+fn status_reports_an_index_configuration_mismatch() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let index_path = temporary.path().join("indexes/workspace.sqlite");
+    fs::create_dir_all(workspace.join("src")).unwrap();
+    run_git(temporary.path(), &["init", workspace.to_str().unwrap()]);
+    fs::write(workspace.join("src/lib.rs"), "pub struct StatusSymbol;\n").unwrap();
+    run_git(&workspace, &["add", "src/lib.rs"]);
+
+    let output = cfind_command(&workspace, &index_path)
+        .arg("--index")
+        .env("CFIND_LANGUAGES", "rust")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let output = cfind_command(&workspace, &index_path)
+        .arg("--status")
+        .env("CFIND_LANGUAGES", "csharp")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "Index configuration does not match at {}\n",
+            index_path.display()
+        )
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn status_reports_the_index_path_and_exact_counts() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let index_path = temporary.path().join("indexes/workspace.sqlite");
+    fs::create_dir_all(workspace.join("src")).unwrap();
+    run_git(temporary.path(), &["init", workspace.to_str().unwrap()]);
+    fs::write(
+        workspace.join("src/lib.rs"),
+        "pub struct StatusSymbol;\npub fn status_function() {}\n",
+    )
+    .unwrap();
+    run_git(&workspace, &["add", "src/lib.rs"]);
+
+    let output = cfind_command(&workspace, &index_path)
+        .arg("--index")
+        .env("CFIND_LANGUAGES", "rust")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let output = cfind_command(&workspace, &index_path)
+        .arg("--status")
+        .env("CFIND_LANGUAGES", "rust")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "Index: {}\nRepositories: 1\nFiles: 1\nSymbols: 2\n",
+            index_path.display()
+        )
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn search_creates_a_missing_index_and_then_returns_results() {
     let temporary = TempDir::new().unwrap();
     let workspace = temporary.path().join("workspace");
