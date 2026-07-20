@@ -20,8 +20,7 @@ Configuration is environment-based:
 ```bash
 export CFIND_ROOT="$HOME/code"
 export CFIND_LANGUAGES="rust,javascript,typescript,csharp"
-export CFIND_FETCH_STALE_DAYS=3
-export CFIND_WARN_AFTER_HOURS=6
+export CFIND_STALE_AFTER_HOURS=6
 ```
 
 `CFIND_ROOT` is required; the tool exits without creating or opening an
@@ -52,15 +51,14 @@ Set `CFIND_INDEX` to override the database path explicitly.
 
 Language aliases such as `rs`, `js`, `ts`, `cs`, and `c#` are accepted.
 
-`CFIND_FETCH_STALE_DAYS` defaults to `3`. Results from a repository whose
-last fetch is older than that threshold, whose current branch is not the cached
-origin default branch, or whose fetch state is unknown include a compact
-`local-state(...)` suffix. Fresh results include no state suffix. Set the value
-to `0` to disable Git-state collection and output.
-
-`CFIND_WARN_AFTER_HOURS` defaults to `6`. Searches warn when the index is older
-than that period and automatically rebuild it when it is more than three times
-that age (18 hours with the default).
+`CFIND_STALE_AFTER_HOURS` is the single freshness setting and defaults to `6`.
+Searches warn when the index is older than that threshold and automatically
+rebuild it after three times that age (18 hours by default). Results include a
+compact `local-state(...)` suffix when the repository's cached fetch time is
+older than twelve times the configured period (72 hours by default), its
+current branch is not the cached origin default branch, or its fetch state is
+unknown. Set the value to `0` to disable Git state annotations, index-age
+warnings, and automatic age-based rebuilding.
 
 ## Use
 

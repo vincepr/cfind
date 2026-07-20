@@ -21,7 +21,6 @@ pub struct Repository {
     pub origin_branch: Option<String>,
     pub current_branch: Option<String>,
     pub last_fetch_at: Option<u64>,
-    pub git_state_collected: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -33,7 +32,7 @@ fn is_git_metadata(entry: &DirEntry) -> bool {
     entry.file_name() == OsStr::new(".git")
 }
 
-pub fn discover_repositories(root: &Path, collect_git_state: bool) -> Result<Vec<Repository>> {
+pub fn discover_repositories(root: &Path) -> Result<Vec<Repository>> {
     let mut roots = HashSet::new();
 
     if let Ok(top) = git_output(root, &["rev-parse", "--show-toplevel"]) {
@@ -81,26 +80,20 @@ pub fn discover_repositories(root: &Path, collect_git_state: bool) -> Result<Vec
                 .is_none()
                 .then(|| tracked_branch(&repo_root))
                 .flatten();
-            let mut current_branch = None;
-            if collect_git_state || (origin_branch.is_none() && tracked_branch.is_none()) {
-                current_branch = current_branch_name(&repo_root);
-            }
+            let current_branch = current_branch_name(&repo_root);
             let branch = origin_branch
                 .clone()
                 .or(tracked_branch)
                 .or_else(|| current_branch.clone());
-            let last_fetch_at = collect_git_state
-                .then(|| last_fetch_at(&repo_root))
-                .flatten();
+            let last_fetch_at = last_fetch_at(&repo_root);
             Ok(Repository {
                 root: repo_root,
                 remote,
                 revision,
                 branch,
                 origin_branch,
-                current_branch: collect_git_state.then_some(current_branch).flatten(),
+                current_branch,
                 last_fetch_at,
-                git_state_collected: collect_git_state,
             })
         })
         .collect::<Result<Vec<_>>>()?;

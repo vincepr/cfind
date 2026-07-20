@@ -24,7 +24,7 @@ pub struct IndexStats {
     pub elapsed_ms: u128,
 }
 
-const INDEX_VERSION: u64 = 6;
+const INDEX_VERSION: u64 = 7;
 
 struct ParsedFile {
     path: String,
@@ -66,8 +66,7 @@ fn create_database(path: &Path) -> Result<Connection> {
              branch TEXT,
              origin_branch TEXT,
              current_branch TEXT,
-             last_fetch_at INTEGER,
-             git_state_collected INTEGER NOT NULL DEFAULT 0
+             last_fetch_at INTEGER
          );
          CREATE TABLE IF NOT EXISTS files (
              id INTEGER PRIMARY KEY,
@@ -101,7 +100,7 @@ fn create_database(path: &Path) -> Result<Connection> {
 
 pub fn rebuild(config: &Config) -> Result<IndexStats> {
     let started = Instant::now();
-    let repositories = discover_repositories(&config.root, config.fetch_stale_days > 0)?;
+    let repositories = discover_repositories(&config.root)?;
     let temporary_path = reserve_temporary_index_path(&config.index_path)?;
     let mut connection = match create_database(&temporary_path) {
         Ok(connection) => connection,
@@ -279,8 +278,8 @@ fn index_repository(
     connection.execute(
         "INSERT INTO repositories(
              root, remote, revision, branch, origin_branch, current_branch,
-             last_fetch_at, git_state_collected
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             last_fetch_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ",
         params![
             root,
@@ -290,7 +289,6 @@ fn index_repository(
             repository.origin_branch,
             repository.current_branch,
             repository.last_fetch_at,
-            repository.git_state_collected,
         ],
     )?;
     let repository_id: i64 = connection.query_row(
@@ -394,10 +392,13 @@ pub fn index_state(path: &Path, config: &Config) -> Result<IndexState> {
     };
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let age = Duration::from_secs(now.saturating_sub(created_at));
-    let rebuild_after = config.warn_after.saturating_mul(3);
+    if config.stale_after.is_zero() {
+        return Ok(IndexState::Fresh);
+    }
+    let rebuild_after = config.automatic_rebuild_after();
     if age > rebuild_after {
         Ok(IndexState::Rebuild)
-    } else if age > config.warn_after {
+    } else if age > config.stale_after {
         Ok(IndexState::Warn)
     } else {
         Ok(IndexState::Fresh)
@@ -420,20 +421,19 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    fn config(root: &Path, warn_after: Duration) -> Config {
+    fn test_config(root: &Path, stale_after: Duration) -> Config {
         Config {
             root: root.to_path_buf(),
             index_path: root.join("index.sqlite"),
             languages: HashSet::from([SupportedLanguage::Rust]),
-            fetch_stale_days: 3,
-            warn_after,
+            stale_after,
         }
     }
 
     #[test]
     fn missing_index_is_reported() {
         let temporary = tempfile::TempDir::new().unwrap();
-        let config = config(temporary.path(), Duration::from_secs(6 * 60 * 60));
+        let config = test_config(temporary.path(), Duration::from_secs(6 * 60 * 60));
         assert_eq!(
             index_state(&config.index_path, &config).unwrap(),
             IndexState::Missing
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn index_age_controls_warning_and_rebuild_states() {
         let temporary = tempfile::TempDir::new().unwrap();
-        let config = config(temporary.path(), Duration::from_secs(10));
+        let config = test_config(temporary.path(), Duration::from_secs(10));
         rebuild(&config).unwrap();
         let connection = open_database(&config.index_path).unwrap();
         let now = SystemTime::now()
@@ -474,12 +474,18 @@ mod tests {
             index_state(&config.index_path, &config).unwrap(),
             IndexState::Rebuild
         );
+
+        let disabled_config = test_config(temporary.path(), Duration::ZERO);
+        assert_eq!(
+            index_state(&disabled_config.index_path, &disabled_config).unwrap(),
+            IndexState::Fresh
+        );
     }
 
     #[test]
     fn index_version_is_part_of_the_configuration() {
         let temporary = tempfile::TempDir::new().unwrap();
-        let config = config(temporary.path(), Duration::from_secs(60));
+        let config = test_config(temporary.path(), Duration::from_secs(60));
         rebuild(&config).unwrap();
         let connection = open_database(&config.index_path).unwrap();
         connection

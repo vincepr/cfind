@@ -120,8 +120,7 @@ fn config(root: &Path, language: SupportedLanguage) -> Config {
         root: root.to_path_buf(),
         index_path: root.join(".cfind.sqlite3"),
         languages: HashSet::from([language]),
-        fetch_stale_days: 3,
-        warn_after: Duration::from_secs(6 * 60 * 60),
+        stale_after: Duration::from_secs(6 * 60 * 60),
     }
 }
 

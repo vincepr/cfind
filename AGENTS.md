@@ -53,8 +53,8 @@ when it has an explicit adapter and tests demonstrating useful symbol extraction
 
 ## CLI and Configuration
 
-- `CFIND_ROOT` is required. `CFIND_INDEX`, `CFIND_LANGUAGES`,
-  `CFIND_FETCH_STALE_DAYS`, and `CFIND_WARN_AFTER_HOURS` are optional.
+- `CFIND_ROOT` is required. `CFIND_INDEX`, `CFIND_LANGUAGES`, and
+  `CFIND_STALE_AFTER_HOURS` are optional.
 - Keep `--help` concise but sufficient for an agent to discover every option and environment value.
 - Preserve the flat query-first interface. Do not introduce nested subcommands without an explicit
   product decision.

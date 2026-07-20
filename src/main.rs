@@ -12,7 +12,7 @@ use clap::Parser;
 #[command(
     version,
     about = "Local code symbol search",
-    after_help = "Examples:\n  cfind DatabaseContext\n  cfind GzipDecompress -f '\\.cs$'\n  cfind --type\n  cfind --index\n  cfind --status\n\nEnvironment:\n  CFIND_ROOT=/path/to/code                         Required repository directory\n  CFIND_INDEX=/path/to/index.sqlite                Optional exact database path\n  CFIND_LANGUAGES=rust,javascript,typescript,csharp Optional languages (default: all)\n  CFIND_FETCH_STALE_DAYS=3                          Fetch-age threshold; 0 disables Git state\n  CFIND_WARN_AFTER_HOURS=6                          Warn about index age; rebuild after 3x"
+    after_help = "Examples:\n  cfind DatabaseContext\n  cfind GzipDecompress -f '\\.cs$'\n  cfind --type\n  cfind --index\n  cfind --status\n\nEnvironment:\n  CFIND_ROOT=/path/to/code                         Required repository directory\n  CFIND_INDEX=/path/to/index.sqlite                Optional exact database path\n  CFIND_LANGUAGES=rust,javascript,typescript,csharp Optional languages (default: all)\n  CFIND_STALE_AFTER_HOURS=6                         Index warn age; rebuild 3x; fetch stale 12x; 0 disables"
 )]
 struct Cli {
     /// Symbol name (fuzzy matching supported).
@@ -116,7 +116,7 @@ fn run() -> Result<()> {
         cli.limit,
         cli.filter.as_deref(),
         symbol_type.as_deref(),
-        (config.fetch_stale_days > 0).then_some(config.fetch_stale_days),
+        (!config.stale_after.is_zero()).then_some(config.fetch_stale_after()),
     )?;
     for result in results {
         let parent = result
@@ -221,7 +221,7 @@ fn ensure_index(config: &Config) -> Result<bool> {
 }
 
 fn warning_period(config: &Config) -> String {
-    let hours = config.warn_after.as_secs() / (60 * 60);
+    let hours = config.stale_after.as_secs() / (60 * 60);
     if hours == 1 {
         "1 hour".to_owned()
     } else {

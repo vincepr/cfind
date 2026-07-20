@@ -39,10 +39,10 @@ fn help_documents_required_environment_and_path_filters() {
         "{stdout}"
     );
     assert!(stdout.contains("--commit-url"), "{stdout}");
-    assert!(stdout.contains("CFIND_FETCH_STALE_DAYS=3"), "{stdout}");
-    assert!(stdout.contains("0 disables Git state"), "{stdout}");
-    assert!(stdout.contains("CFIND_WARN_AFTER_HOURS=6"), "{stdout}");
-    assert!(stdout.contains("rebuild after 3x"), "{stdout}");
+    assert!(stdout.contains("CFIND_STALE_AFTER_HOURS=6"), "{stdout}");
+    assert!(stdout.contains("0 disables"), "{stdout}");
+    assert!(stdout.contains("rebuild 3x"), "{stdout}");
+    assert!(stdout.contains("fetch stale 12x"), "{stdout}");
 }
 
 #[test]
@@ -154,13 +154,13 @@ fn invalid_configuration_fails_before_opening_the_index() {
     let output = Command::new(env!("CARGO_BIN_EXE_cfind"))
         .arg("Anything")
         .env("CFIND_ROOT", temporary.path())
-        .env("CFIND_WARN_AFTER_HOURS", "soon")
+        .env("CFIND_STALE_AFTER_HOURS", "soon")
         .output()
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("CFIND_WARN_AFTER_HOURS must be a non-negative number of hours"),
+        stderr.contains("CFIND_STALE_AFTER_HOURS must be a non-negative number of hours"),
         "{stderr}"
     );
 }
@@ -226,7 +226,7 @@ fn old_index_warns_then_rebuilds_after_three_warning_periods() {
 
     let output = cfind_command(&workspace, &index_path)
         .arg("OriginalSymbol")
-        .env("CFIND_WARN_AFTER_HOURS", "1")
+        .env("CFIND_STALE_AFTER_HOURS", "1")
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -235,7 +235,7 @@ fn old_index_warns_then_rebuilds_after_three_warning_periods() {
     set_index_creation_age(&index_path, 60 * 60 + 1);
     let output = cfind_command(&workspace, &index_path)
         .arg("OriginalSymbol")
-        .env("CFIND_WARN_AFTER_HOURS", "1")
+        .env("CFIND_STALE_AFTER_HOURS", "1")
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -249,7 +249,7 @@ fn old_index_warns_then_rebuilds_after_three_warning_periods() {
     set_index_creation_age(&index_path, 3 * 60 * 60 + 1);
     let output = cfind_command(&workspace, &index_path)
         .arg("UpdatedSymbol")
-        .env("CFIND_WARN_AFTER_HOURS", "1")
+        .env("CFIND_STALE_AFTER_HOURS", "1")
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -343,7 +343,7 @@ fn branch_urls_are_default_and_commit_urls_are_opt_in() {
 
     let output = cfind_command(&workspace, &index_path)
         .args(["RemoteSymbol", "--commit-url", "--quiet"])
-        .env("CFIND_FETCH_STALE_DAYS", "0")
+        .env("CFIND_STALE_AFTER_HOURS", "0")
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -445,7 +445,7 @@ fn cfind_command(workspace: &Path, index_path: &Path) -> Command {
         .current_dir(workspace)
         .env("CFIND_ROOT", workspace)
         .env("CFIND_INDEX", index_path)
-        .env_remove("CFIND_WARN_AFTER_HOURS");
+        .env_remove("CFIND_STALE_AFTER_HOURS");
     command
 }
 

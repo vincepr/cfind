@@ -10,10 +10,10 @@ use anyhow::{Context, Result, bail};
 pub const ROOT_ENV: &str = "CFIND_ROOT";
 pub const LANGUAGES_ENV: &str = "CFIND_LANGUAGES";
 pub const INDEX_ENV: &str = "CFIND_INDEX";
-pub const FETCH_STALE_DAYS_ENV: &str = "CFIND_FETCH_STALE_DAYS";
-pub const WARN_AFTER_HOURS_ENV: &str = "CFIND_WARN_AFTER_HOURS";
-const DEFAULT_FETCH_STALE_DAYS: u64 = 3;
-const DEFAULT_WARN_AFTER_HOURS: u64 = 6;
+pub const STALE_AFTER_HOURS_ENV: &str = "CFIND_STALE_AFTER_HOURS";
+const DEFAULT_STALE_AFTER_HOURS: u64 = 6;
+const AUTOMATIC_REBUILD_MULTIPLIER: u32 = 3;
+const FETCH_STALE_MULTIPLIER: u32 = 12;
 #[cfg(not(target_os = "windows"))]
 const ROOT_REQUIRED_MESSAGE: &str = "CFIND_ROOT is required; set it to the directory containing your repositories, for example: export CFIND_ROOT=\"$HOME/code\"";
 #[cfg(target_os = "windows")]
@@ -54,8 +54,7 @@ pub struct Config {
     pub root: PathBuf,
     pub index_path: PathBuf,
     pub languages: HashSet<SupportedLanguage>,
-    pub fetch_stale_days: u64,
-    pub warn_after: Duration,
+    pub stale_after: Duration,
 }
 
 impl Config {
@@ -89,31 +88,34 @@ impl Config {
             Some(_) => bail!("{INDEX_ENV} must not be empty"),
             None => default_index_path(&root)?,
         };
-        let fetch_stale_days = env::var(FETCH_STALE_DAYS_ENV)
+        let stale_after_hours = env::var(STALE_AFTER_HOURS_ENV)
             .map(|value| {
                 value.parse::<u64>().with_context(|| {
-                    format!("{FETCH_STALE_DAYS_ENV} must be a non-negative number of days")
+                    format!("{STALE_AFTER_HOURS_ENV} must be a non-negative number of hours")
                 })
             })
-            .unwrap_or(Ok(DEFAULT_FETCH_STALE_DAYS))?;
-        let warn_after_hours = env::var(WARN_AFTER_HOURS_ENV)
-            .map(|value| {
-                value.parse::<u64>().with_context(|| {
-                    format!("{WARN_AFTER_HOURS_ENV} must be a non-negative number of hours")
-                })
-            })
-            .unwrap_or(Ok(DEFAULT_WARN_AFTER_HOURS))?;
-        let warn_after_seconds = warn_after_hours.checked_mul(60 * 60).with_context(|| {
-            format!("{WARN_AFTER_HOURS_ENV} is too large to represent as a duration")
+            .unwrap_or(Ok(DEFAULT_STALE_AFTER_HOURS))?;
+        let stale_after_seconds = stale_after_hours.checked_mul(60 * 60).with_context(|| {
+            format!("{STALE_AFTER_HOURS_ENV} is too large to represent as a duration")
         })?;
 
         Ok(Self {
             root,
             index_path,
             languages,
-            fetch_stale_days,
-            warn_after: Duration::from_secs(warn_after_seconds),
+            stale_after: Duration::from_secs(stale_after_seconds),
         })
+    }
+
+    /// Returns the index age that triggers an automatic rebuild.
+    pub fn automatic_rebuild_after(&self) -> Duration {
+        self.stale_after
+            .saturating_mul(AUTOMATIC_REBUILD_MULTIPLIER)
+    }
+
+    /// Returns the cached Git fetch age that produces a stale-state annotation.
+    pub fn fetch_stale_after(&self) -> Duration {
+        self.stale_after.saturating_mul(FETCH_STALE_MULTIPLIER)
     }
 }
 

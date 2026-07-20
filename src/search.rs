@@ -1,7 +1,7 @@
 use std::{
     cmp::Ordering,
     path::Path,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -45,7 +45,7 @@ pub fn search_filtered(
     limit: usize,
     path_filter: Option<&str>,
     symbol_kind: Option<&str>,
-    fetch_stale_days: Option<u64>,
+    stale_after: Option<Duration>,
 ) -> Result<Vec<SearchResult>> {
     let query_normalized = query.to_ascii_lowercase();
     let path_filter = path_filter
@@ -56,8 +56,7 @@ pub fn search_filtered(
         "SELECT s.name, s.normalized_name, s.kind, s.parent, s.namespace,
                 s.start_line, s.end_line,
                 f.path, r.root, r.remote, r.revision, r.branch,
-                r.origin_branch, r.current_branch, r.last_fetch_at,
-                r.git_state_collected
+                r.origin_branch, r.current_branch, r.last_fetch_at
          FROM symbols s
          JOIN files f ON f.id = s.file_id
          JOIN repositories r ON r.id = f.repository_id",
@@ -79,7 +78,6 @@ pub fn search_filtered(
             row.get::<_, Option<String>>(12)?,
             row.get::<_, Option<String>>(13)?,
             row.get::<_, Option<u64>>(14)?,
-            row.get::<_, bool>(15)?,
         ))
     })?;
 
@@ -101,7 +99,6 @@ pub fn search_filtered(
             origin_branch,
             current_branch,
             last_fetch_at,
-            git_state_collected,
         ) = row?;
         if symbol_kind.is_some_and(|filter| kind != filter) {
             continue;
@@ -148,14 +145,13 @@ pub fn search_filtered(
                     start_line,
                     end_line,
                 ),
-                git_state: fetch_stale_days.and_then(|days| {
+                git_state: stale_after.and_then(|stale_after| {
                     stale_git_state(
                         remote.as_deref(),
                         origin_branch.as_deref(),
                         current_branch.as_deref(),
                         last_fetch_at,
-                        days,
-                        git_state_collected,
+                        stale_after,
                     )
                 }),
             },
@@ -176,10 +172,9 @@ fn stale_git_state(
     origin_branch: Option<&str>,
     current_branch: Option<&str>,
     last_fetch_at: Option<u64>,
-    stale_days: u64,
-    collected: bool,
+    stale_after: Duration,
 ) -> Option<String> {
-    if !collected || remote.is_none() || stale_days == 0 {
+    if remote.is_none() || stale_after.is_zero() {
         return None;
     }
     let mut reasons = Vec::new();
@@ -195,7 +190,7 @@ fn stale_git_state(
                 .duration_since(UNIX_EPOCH)
                 .map_or(fetched_at, |duration| duration.as_secs());
             let age_seconds = now.saturating_sub(fetched_at);
-            if age_seconds > stale_days.saturating_mul(24 * 60 * 60) {
+            if age_seconds > stale_after.as_secs() {
                 reasons.push(format!("fetch>{}d", age_seconds / (24 * 60 * 60)));
             }
         }
@@ -298,8 +293,7 @@ mod tests {
                 Some("main"),
                 Some("main"),
                 Some(now - 2 * 24 * 60 * 60),
-                3,
-                true,
+                Duration::from_secs(3 * 24 * 60 * 60),
             ),
             None
         );
@@ -309,8 +303,7 @@ mod tests {
                 Some("main"),
                 Some("feature/payments"),
                 Some(now - 5 * 24 * 60 * 60),
-                3,
-                true,
+                Duration::from_secs(3 * 24 * 60 * 60),
             ),
             Some("local-state(not-origin-branch,fetch>5d)".to_owned())
         );
@@ -320,8 +313,7 @@ mod tests {
                 Some("main"),
                 Some("feature/payments"),
                 None,
-                0,
-                false,
+                Duration::ZERO,
             ),
             None
         );
