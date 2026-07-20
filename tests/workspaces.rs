@@ -66,6 +66,33 @@ fn workspaces_have_independent_indexes_and_ignore_untracked_files() {
 }
 
 #[test]
+fn ignores_malformed_git_markers_without_excluding_cache_repositories() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let cached_repository = workspace.join(".cache/projects/example");
+    create_repository(
+        &cached_repository,
+        "src/lib.rs",
+        "pub struct CachedRepositorySymbol;\n",
+    );
+    let malformed_candidate = workspace.join(".cache/uv/sdists-v9");
+    fs::create_dir_all(&malformed_candidate).unwrap();
+    fs::write(
+        malformed_candidate.join(".git"),
+        "not a valid gitdir pointer\n",
+    )
+    .unwrap();
+
+    let config = config(&workspace, SupportedLanguage::Rust);
+    rebuild(&config).unwrap();
+
+    let database = open_database(&config.index_path).unwrap();
+    let results = search(&database, "CachedRepositorySymbol", &workspace, 10).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].name, "CachedRepositorySymbol");
+}
+
+#[test]
 fn reindexes_uncommitted_changes_to_tracked_files() {
     let temporary = TempDir::new().unwrap();
     let workspace = temporary.path().join("workspace");

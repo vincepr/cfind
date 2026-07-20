@@ -57,7 +57,7 @@ pub fn discover_repositories(root: &Path) -> Result<Vec<Repository>> {
 
     let mut repositories = roots
         .into_iter()
-        .map(|repo_root| {
+        .filter_map(|repo_root| {
             let revision = match git_output(&repo_root, &["rev-parse", "--verify", "HEAD"]) {
                 Ok(revision) => revision.trim().to_owned(),
                 Err(_) if git_output(&repo_root, &["symbolic-ref", "-q", "HEAD"]).is_ok() => {
@@ -66,9 +66,14 @@ pub fn discover_repositories(root: &Path) -> Result<Vec<Repository>> {
                     String::new()
                 }
                 Err(error) => {
-                    return Err(error).with_context(|| {
+                    // Ignore stray .git markers, but preserve the HEAD error for
+                    // repositories whose Git directory is otherwise valid.
+                    if git_output(&repo_root, &["rev-parse", "--git-dir"]).is_err() {
+                        return None;
+                    }
+                    return Some(Err(error).with_context(|| {
                         format!("could not read HEAD for {}", repo_root.display())
-                    });
+                    }));
                 }
             };
             let remote = git_output(&repo_root, &["remote", "get-url", "origin"])
@@ -86,7 +91,7 @@ pub fn discover_repositories(root: &Path) -> Result<Vec<Repository>> {
                 .or(tracked_branch)
                 .or_else(|| current_branch.clone());
             let last_fetch_at = last_fetch_at(&repo_root);
-            Ok(Repository {
+            Some(Ok(Repository {
                 root: repo_root,
                 remote,
                 revision,
@@ -94,7 +99,7 @@ pub fn discover_repositories(root: &Path) -> Result<Vec<Repository>> {
                 origin_branch,
                 current_branch,
                 last_fetch_at,
-            })
+            }))
         })
         .collect::<Result<Vec<_>>>()?;
     repositories.sort_by(|left, right| left.root.cmp(&right.root));
