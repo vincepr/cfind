@@ -4,7 +4,10 @@ use anyhow::{Context, Result, bail};
 use cfind::{
     config::Config,
     index::{IndexState, index_state, open_database, rebuild},
-    search::{canonical_search_origin, distinct_symbol_kinds, query_terms, search_filtered_terms},
+    search::{
+        canonical_search_origin, distinct_symbol_kinds, query_terms, rough_search_filtered_terms,
+        search_filtered_terms,
+    },
 };
 use clap::Parser;
 
@@ -12,7 +15,7 @@ use clap::Parser;
 #[command(
     version,
     about = "Local code symbol search",
-    after_help = "Examples:\n  cfind DatabaseContext\n  cfind GzipDecompress -f '\\.cs$'\n  cfind --type\n  cfind --index\n  cfind --status\n\nEnvironment:\n  CFIND_ROOT=/path/to/code                         Required repository directory\n  CFIND_INDEX=/path/to/index.sqlite                Optional exact database path\n  CFIND_LANGUAGES=rust,javascript,typescript,csharp Optional languages (default: all)\n  CFIND_STALE_AFTER_HOURS=6                         Index warn age; rebuild 3x; fetch stale 12x; 0 disables"
+    after_help = "Examples:\n  cfind DatabaseContext\n  cfind Database --rough\n  cfind GzipDecompress -f '\\.cs$'\n  cfind --type\n  cfind --index\n  cfind --status\n\nEnvironment:\n  CFIND_ROOT=/path/to/code                         Required repository directory\n  CFIND_INDEX=/path/to/index.sqlite                Optional exact database path\n  CFIND_LANGUAGES=rust,javascript,typescript,csharp Optional languages (default: all)\n  CFIND_STALE_AFTER_HOURS=6                         Index warn age; rebuild 3x; fetch stale 12x; 0 disables"
 )]
 struct Cli {
     /// Symbol name terms (fuzzy and qualified matching supported).
@@ -42,6 +45,9 @@ struct Cli {
     /// Omit repository URLs.
     #[arg(short, long)]
     quiet: bool,
+    /// Collapse matches into high-level containing units.
+    #[arg(long)]
+    rough: bool,
 }
 
 fn main() {
@@ -105,6 +111,57 @@ fn run() -> Result<()> {
         &cli.from
             .unwrap_or(env::current_dir().context("could not determine current directory")?),
     )?;
+    if cli.rough {
+        let results = rough_search_filtered_terms(
+            &connection,
+            &terms,
+            &from,
+            cli.limit,
+            cli.filter.as_deref(),
+            symbol_type.as_deref(),
+            (!config.stale_after.is_zero()).then_some(config.fetch_stale_after()),
+        )?;
+        if results.is_empty() {
+            bail!("no symbols matched '{query_label}' with the selected filters");
+        }
+        for group in results {
+            let result = group.representative;
+            let parent = result
+                .parent
+                .as_deref()
+                .map(|parent| format!(" in {parent}"))
+                .unwrap_or_default();
+            let git_state = result
+                .git_state
+                .as_deref()
+                .map(|state| format!(" {state}"))
+                .unwrap_or_default();
+            println!(
+                "{}  {}{}  {}{}  matches={}",
+                result.kind, result.name, parent, result.match_score, git_state, group.match_count
+            );
+            if let Some(directory) = group.shared_directory {
+                println!("  {}", directory.display());
+            } else {
+                println!("  {}:{}", result.local_path.display(), result.start_line);
+                let url = if cli.quiet {
+                    None
+                } else if cli.commit_url {
+                    result.commit_url.or(result.remote_url)
+                } else {
+                    result.remote_url
+                };
+                if let Some(url) = url {
+                    println!("  {url}");
+                }
+            }
+            if result.qualified_name != result.name {
+                println!("  {}", result.qualified_name);
+            }
+            println!();
+        }
+        return Ok(());
+    }
     let results = search_filtered_terms(
         &connection,
         &terms,

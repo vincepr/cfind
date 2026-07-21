@@ -35,3 +35,10 @@ pub struct SearchResult {
     pub commit_url: Option<String>,
     pub git_state: Option<String>,
 }
+
+#[derive(Debug, Clone)]
+pub struct RoughSearchResult {
+    pub representative: SearchResult,
+    pub match_count: usize,
+    pub shared_directory: Option<PathBuf>,
+}

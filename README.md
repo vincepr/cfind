@@ -74,6 +74,7 @@ cfind GzipDecompress -f '\.cs$'
 cfind Config -f '^src/.*\.rs$'
 cfind --type
 cfind DatabaseContext --type class
+cfind Database --rough
 cfind DatabaseContext --commit-url
 cfind DatabaseContext --quiet
 cfind --status
@@ -94,6 +95,15 @@ example, `--filter '\.cs$'` matches C# files anywhere in a repository.
 Searches return at most 10 results by default; use `--limit` to change that.
 Pass `--quiet` to omit repository URLs from results, including when
 `--commit-url` is also present.
+
+Pass `--rough` for an overview instead of the default symbol-by-symbol result
+list. Rough results are grouped before `--limit` is applied. A matching
+namespace is shown once at the common directory containing its matching
+symbols; matches within the same enclosing type are shown once at the type
+declaration. Each row includes a `matches=N` size hint. Group rank is based on
+the best matching symbol, and all existing path, kind, URL, origin, and limit
+options remain composable with the mode. Without `--rough`, output and ranking
+retain their precise symbol-level behavior.
 
 Use `--type class` (or another indexed kind) to restrict symbol kinds. Run
 `cfind --type` without a query or value to list every distinct kind in the

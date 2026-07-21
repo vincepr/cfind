@@ -39,6 +39,7 @@ fn help_documents_required_environment_and_path_filters() {
         "{stdout}"
     );
     assert!(stdout.contains("--commit-url"), "{stdout}");
+    assert!(stdout.contains("--rough"), "{stdout}");
     assert!(stdout.contains("CFIND_STALE_AFTER_HOURS=6"), "{stdout}");
     assert!(stdout.contains("0 disables"), "{stdout}");
     assert!(stdout.contains("rebuild 3x"), "{stdout}");
@@ -863,6 +864,155 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
             .count(),
         2
     );
+}
+
+#[test]
+fn rough_search_collapses_namespace_matches_to_their_shared_directory() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let source_directory = workspace.join("src/services");
+    let index_path = temporary.path().join("indexes/workspace.sqlite");
+    fs::create_dir_all(&source_directory).unwrap();
+    run_git(temporary.path(), &["init", workspace.to_str().unwrap()]);
+    fs::write(
+        source_directory.join("Payments.cs"),
+        "namespace Acme.Services;\npublic class PaymentService {\n    public PaymentService() {}\n    public void Connect() {}\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        source_directory.join("Refunds.cs"),
+        "namespace Acme.Services;\npublic class RefundService {\n    public void Disconnect() {}\n}\n",
+    )
+    .unwrap();
+    run_git(
+        &workspace,
+        &["add", "src/services/Payments.cs", "src/services/Refunds.cs"],
+    );
+
+    let output = cfind_command(&workspace, &index_path)
+        .args(["Acme.Services", "--rough", "--limit", "10", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.matches("namespace  Acme.Services  ").count(),
+        1,
+        "{stdout}"
+    );
+    assert!(stdout.contains("matches=7"), "{stdout}");
+    assert!(
+        stdout.contains(&source_directory.display().to_string()),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("Payments.cs"), "{stdout}");
+    assert!(!stdout.contains("Refunds.cs"), "{stdout}");
+
+    let output = cfind_command(&workspace, &index_path)
+        .args(["Acme.Services", "Payment", "--rough", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.starts_with("namespace  Acme.Services  "), "{stdout}");
+    assert!(stdout.contains("matches=7"), "{stdout}");
+}
+
+#[test]
+fn rough_search_collapses_types_and_members_before_applying_the_limit() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let source_path = workspace.join("src/Payments.cs");
+    let index_path = temporary.path().join("indexes/workspace.sqlite");
+    fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+    run_git(temporary.path(), &["init", workspace.to_str().unwrap()]);
+    fs::write(
+        &source_path,
+        "namespace Acme.Services;\npublic class PaymentService {\n    public PaymentService() {}\n    public void ProcessPayment() {}\n    public string PaymentStatus { get; }\n}\npublic class PaymentGateway {\n    public PaymentGateway() {}\n    public void SendPayment() {}\n}\n",
+    )
+    .unwrap();
+    run_git(&workspace, &["add", "src/Payments.cs"]);
+
+    let detailed = cfind_command(&workspace, &index_path)
+        .args(["Payment", "--limit", "10", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(detailed.status.success());
+    let detailed_stdout = String::from_utf8_lossy(&detailed.stdout);
+    assert!(detailed_stdout.contains("constructor  PaymentService"));
+    assert!(detailed_stdout.contains("method  ProcessPayment"));
+    assert!(!detailed_stdout.contains("matches="));
+
+    let output = cfind_command(&workspace, &index_path)
+        .args(["Payment", "--rough", "--limit", "2", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.matches("class  PaymentService  ").count(),
+        1,
+        "{stdout}"
+    );
+    assert_eq!(
+        stdout.matches("class  PaymentGateway  ").count(),
+        1,
+        "{stdout}"
+    );
+    assert!(stdout.contains("matches=4"), "{stdout}");
+    assert!(stdout.contains("matches=3"), "{stdout}");
+    assert!(!stdout.contains("constructor  "), "{stdout}");
+    assert!(!stdout.contains("method  "), "{stdout}");
+    assert!(
+        stdout.contains(&format!("{}:2", source_path.display())),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{}:7", source_path.display())),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn rough_search_uses_the_enclosing_type_when_only_members_match() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let source_path = workspace.join("src/Handlers.ts");
+    let index_path = temporary.path().join("indexes/workspace.sqlite");
+    fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+    run_git(temporary.path(), &["init", workspace.to_str().unwrap()]);
+    fs::write(
+        &source_path,
+        "class RequestHandler {\n  getUser() {}\n  getOrder() {}\n}\n",
+    )
+    .unwrap();
+    run_git(&workspace, &["add", "src/Handlers.ts"]);
+
+    let output = cfind_command(&workspace, &index_path)
+        .args(["get", "--rough", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("class  RequestHandler  "), "{stdout}");
+    assert!(stdout.contains("matches=2"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("{}:1", source_path.display())),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("method  get"), "{stdout}");
 }
 
 fn cfind_command(workspace: &Path, index_path: &Path) -> Command {

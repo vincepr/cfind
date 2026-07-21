@@ -1,17 +1,17 @@
 use std::{
     cmp::Ordering,
-    collections::HashSet,
-    path::Path,
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use regex::Regex;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension, params};
 use strsim::osa_distance;
 
 use crate::{
-    SearchResult,
+    RoughSearchResult, SearchResult,
     git::{remote_branch_file_url, remote_file_url},
 };
 
@@ -75,6 +75,283 @@ pub fn search_filtered_terms(
     if limit == 0 {
         return Ok(Vec::new());
     }
+    let ranked = ranked_filtered_terms(
+        connection,
+        &terms,
+        from,
+        path_filter,
+        symbol_kind,
+        stale_after,
+    )?;
+    let mut namespaces = HashSet::new();
+    let mut results = Vec::with_capacity(limit.min(ranked.len()));
+    for item in ranked {
+        if item.result.kind == "namespace"
+            && !namespaces.insert((item.repository_root, item.result.name.to_ascii_lowercase()))
+        {
+            continue;
+        }
+        results.push(item.result);
+        if results.len() == limit {
+            break;
+        }
+    }
+    Ok(results)
+}
+
+pub fn rough_search_filtered_terms(
+    connection: &Connection,
+    query_parts: &[String],
+    from: &Path,
+    limit: usize,
+    path_filter: Option<&str>,
+    symbol_kind: Option<&str>,
+    stale_after: Option<Duration>,
+) -> Result<Vec<RoughSearchResult>> {
+    let terms = query_terms(query_parts)?;
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let ranked = ranked_filtered_terms(
+        connection,
+        &terms,
+        from,
+        path_filter,
+        symbol_kind,
+        stale_after,
+    )?;
+    let matching_namespaces = ranked
+        .iter()
+        .filter(|item| item.result.kind == "namespace")
+        .map(|item| {
+            (
+                item.repository_root.clone(),
+                item.result.name.to_ascii_lowercase(),
+            )
+        })
+        .collect::<HashSet<_>>();
+    let enclosing_types = ranked
+        .iter()
+        .filter_map(|item| {
+            enclosing_qualified_name(&item.result)
+                .map(|qualified_name| (item.repository_root.clone(), qualified_name.to_owned()))
+        })
+        .collect::<HashSet<_>>();
+    let mut namespace_groups: HashMap<(String, String), usize> = HashMap::new();
+    let mut type_groups: HashMap<(String, String), usize> = HashMap::new();
+    let mut results: Vec<RoughSearchResult> = Vec::new();
+    for mut item in ranked {
+        let namespace_name = if item.result.kind == "namespace" {
+            Some(item.result.name.as_str())
+        } else {
+            item.result.namespace.as_deref()
+        };
+        let namespace_key =
+            namespace_name.map(|name| (item.repository_root.clone(), name.to_ascii_lowercase()));
+        if let Some(key) = namespace_key
+            && matching_namespaces.contains(&key)
+        {
+            let directory = item
+                .result
+                .local_path
+                .parent()
+                .unwrap_or(&item.result.local_path)
+                .to_path_buf();
+            if let Some(index) = namespace_groups.get(&key).copied() {
+                let group = &mut results[index];
+                group.match_count += 1;
+                group.shared_directory = Some(common_path(
+                    group.shared_directory.as_deref().unwrap_or(&directory),
+                    &directory,
+                ));
+                if item.result.kind == "namespace" && group.representative.kind != "namespace" {
+                    item.result.match_score = item
+                        .result
+                        .match_score
+                        .max(group.representative.match_score);
+                    group.representative = item.result;
+                }
+            } else {
+                let index = results.len();
+                namespace_groups.insert(key, index);
+                results.push(RoughSearchResult {
+                    representative: item.result,
+                    match_count: 1,
+                    shared_directory: Some(directory),
+                });
+            }
+        } else if let Some(key) = rough_type_key(&item, &enclosing_types) {
+            if let Some(index) = type_groups.get(&key).copied() {
+                let group = &mut results[index];
+                group.match_count += 1;
+                if item.result.qualified_name == key.1 {
+                    item.result.match_score = item
+                        .result
+                        .match_score
+                        .max(group.representative.match_score);
+                    group.representative = item.result;
+                }
+            } else {
+                let index = results.len();
+                let enclosing_name = key.1.clone();
+                type_groups.insert(key, index);
+                let representative = if item.result.qualified_name == enclosing_name {
+                    item.result
+                } else {
+                    enclosing_representative(
+                        connection,
+                        &item.repository_root,
+                        &enclosing_name,
+                        &item.result.relative_path,
+                        item.result.match_score,
+                        stale_after,
+                    )?
+                    .unwrap_or(item.result)
+                };
+                results.push(RoughSearchResult {
+                    representative,
+                    match_count: 1,
+                    shared_directory: None,
+                });
+            }
+        } else {
+            results.push(RoughSearchResult {
+                representative: item.result,
+                match_count: 1,
+                shared_directory: None,
+            });
+        }
+    }
+    results.truncate(limit);
+    Ok(results)
+}
+
+fn enclosing_representative(
+    connection: &Connection,
+    repository_root: &str,
+    qualified_name: &str,
+    preferred_path: &str,
+    match_score: u16,
+    stale_after: Option<Duration>,
+) -> Result<Option<SearchResult>> {
+    let mut statement = connection.prepare(
+        "SELECT s.name, s.qualified_name, s.kind, s.parent, s.namespace,
+                s.start_line, s.end_line,
+                f.path, r.remote, r.revision, r.branch,
+                r.origin_branch, r.current_branch, r.last_fetch_at
+         FROM symbols s
+         JOIN files f ON f.id = s.file_id
+         JOIN repositories r ON r.id = f.repository_id
+         WHERE r.root = ?1 AND s.qualified_name = ?2
+         ORDER BY CASE WHEN f.path = ?3 THEN 0 ELSE 1 END, f.path, s.start_line
+         LIMIT 1",
+    )?;
+    let row = statement
+        .query_row(
+            params![repository_root, qualified_name, preferred_path],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, usize>(5)?,
+                    row.get::<_, usize>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, Option<u64>>(13)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        name,
+        qualified_name,
+        kind,
+        parent,
+        namespace,
+        start_line,
+        end_line,
+        relative_path,
+        remote,
+        revision,
+        branch,
+        origin_branch,
+        current_branch,
+        last_fetch_at,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    Ok(Some(SearchResult {
+        name,
+        qualified_name,
+        kind,
+        match_score,
+        namespace,
+        parent,
+        local_path: Path::new(repository_root).join(&relative_path),
+        relative_path: relative_path.clone(),
+        start_line,
+        end_line,
+        remote_url: branch
+            .as_deref()
+            .and_then(|branch| remote_branch_file_url(remote.as_deref(), branch, &relative_path)),
+        commit_url: remote_file_url(
+            remote.as_deref(),
+            &revision,
+            &relative_path,
+            start_line,
+            end_line,
+        ),
+        git_state: stale_after.and_then(|stale_after| {
+            stale_git_state(
+                remote.as_deref(),
+                origin_branch.as_deref(),
+                current_branch.as_deref(),
+                last_fetch_at,
+                stale_after,
+            )
+        }),
+    }))
+}
+
+fn rough_type_key(
+    item: &RankedResult,
+    enclosing_types: &HashSet<(String, String)>,
+) -> Option<(String, String)> {
+    let own_key = (
+        item.repository_root.clone(),
+        item.result.qualified_name.clone(),
+    );
+    if enclosing_types.contains(&own_key) {
+        return Some(own_key);
+    }
+    enclosing_qualified_name(&item.result)
+        .map(|qualified_name| (item.repository_root.clone(), qualified_name.to_owned()))
+}
+
+fn enclosing_qualified_name(result: &SearchResult) -> Option<&str> {
+    result.parent.as_ref()?;
+    let enclosing = result.qualified_name.strip_suffix(&result.name)?;
+    enclosing
+        .strip_suffix("::")
+        .or_else(|| enclosing.strip_suffix('.'))
+}
+
+fn ranked_filtered_terms(
+    connection: &Connection,
+    terms: &[String],
+    from: &Path,
+    path_filter: Option<&str>,
+    symbol_kind: Option<&str>,
+    stale_after: Option<Duration>,
+) -> Result<Vec<RankedResult>> {
     let canonical_terms = terms
         .iter()
         .map(|term| canonical_name(term))
@@ -210,20 +487,15 @@ pub fn search_filtered_terms(
         });
     }
     ranked.sort_by(compare_ranked);
-    let mut namespaces = HashSet::new();
-    let mut results = Vec::with_capacity(limit.min(ranked.len()));
-    for item in ranked {
-        if item.result.kind == "namespace"
-            && !namespaces.insert((item.repository_root, item.result.name.to_ascii_lowercase()))
-        {
-            continue;
-        }
-        results.push(item.result);
-        if results.len() == limit {
-            break;
-        }
-    }
-    Ok(results)
+    Ok(ranked)
+}
+
+fn common_path(left: &Path, right: &Path) -> PathBuf {
+    left.components()
+        .zip(right.components())
+        .take_while(|(left, right)| left == right)
+        .map(|(component, _)| component.as_os_str())
+        .collect()
 }
 
 fn stale_git_state(
