@@ -42,9 +42,6 @@ struct Cli {
     /// Omit repository URLs.
     #[arg(short, long)]
     quiet: bool,
-    /// Include qualified names.
-    #[arg(short, long)]
-    verbose: bool,
 }
 
 fn main() {
@@ -151,7 +148,7 @@ fn run() -> Result<()> {
         if let Some(url) = url {
             println!("  {url}");
         }
-        if cli.verbose && result.qualified_name != result.name {
+        if result.qualified_name != result.name {
             println!("  {}", result.qualified_name);
         }
         println!();

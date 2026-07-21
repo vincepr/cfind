@@ -28,7 +28,7 @@ fn help_documents_required_environment_and_path_filters() {
         stdout.contains("omit TYPE to list indexed kinds"),
         "{stdout}"
     );
-    assert!(stdout.contains("--verbose"), "{stdout}");
+    assert!(!stdout.contains("--verbose"), "{stdout}");
     assert!(stdout.contains("cfind --type"), "{stdout}");
     assert!(
         stdout.contains("CFIND_LANGUAGES=rust,javascript,typescript,csharp"),
@@ -43,6 +43,18 @@ fn help_documents_required_environment_and_path_filters() {
     assert!(stdout.contains("0 disables"), "{stdout}");
     assert!(stdout.contains("rebuild 3x"), "{stdout}");
     assert!(stdout.contains("fetch stale 12x"), "{stdout}");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cfind"))
+        .arg("--verbose")
+        .env_remove("CFIND_ROOT")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--verbose'"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -525,6 +537,14 @@ fn search_filters_results_by_path_regex() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("src/Shared.cs"), "{stdout}");
     assert!(!stdout.contains("src/shared.rs"), "{stdout}");
+    assert!(
+        stdout.contains("\n  Acme.Data.SharedSymbol\n\n"),
+        "{stdout}"
+    );
+    let path = stdout.find("src/Shared.cs:2").unwrap();
+    let url = stdout.find("https://github.com/acme/shared/").unwrap();
+    let qualified_name = stdout.rfind("\n  Acme.Data.SharedSymbol").unwrap();
+    assert!(path < url && url < qualified_name, "{stdout}");
     assert!(stdout.ends_with("\n\n"), "{stdout}");
 
     let output = cfind_command(&workspace, &index_path)
@@ -545,22 +565,31 @@ fn search_filters_results_by_path_regex() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("src/Shared.cs"), "{stdout}");
     assert!(!stdout.contains("src/shared.rs"), "{stdout}");
-
-    let output = cfind_command(&workspace, &index_path)
-        .args(["SharedSymbol", "--type", "class", "--verbose"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(!stdout.contains("namespace Acme.Data"), "{stdout}");
     assert!(
         stdout.contains("\n  Acme.Data.SharedSymbol\n\n"),
         "{stdout}"
     );
-    let path = stdout.find("src/Shared.cs:2").unwrap();
-    let url = stdout.find("https://github.com/acme/shared/").unwrap();
-    let namespace = stdout.rfind("\n  Acme.Data.SharedSymbol").unwrap();
-    assert!(path < url && url < namespace, "{stdout}");
+
+    let output = cfind_command(&workspace, &index_path)
+        .args(["SharedSymbol", "--type", "struct"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.matches("SharedSymbol").count(), 1, "{stdout}");
+    assert!(!stdout.contains("\n  SharedSymbol\n"), "{stdout}");
+
+    let output = cfind_command(&workspace, &index_path)
+        .args(["SharedSymbol", "--type", "class", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("https://github.com"), "{stdout}");
+    assert!(
+        stdout.contains("\n  Acme.Data.SharedSymbol\n\n"),
+        "{stdout}"
+    );
 
     let output = cfind_command(&workspace, &index_path)
         .args(["Acme.Data", "--type", "namespace"])
@@ -668,7 +697,6 @@ fn qualified_multi_term_queries_rank_the_leaf_and_accept_options_anywhere() {
             "PaymentProcessor",
             "--type",
             "class",
-            "--verbose",
         ])
         .output()
         .unwrap();
@@ -686,7 +714,7 @@ fn qualified_multi_term_queries_rank_the_leaf_and_accept_options_anywhere() {
 
     let quoted = cfind_command(&workspace, &index_path)
         .arg("Acme Tools PaymentProcessor")
-        .args(["--limit", "1", "--type", "class", "--verbose"])
+        .args(["--limit", "1", "--type", "class"])
         .output()
         .unwrap();
     assert!(quoted.status.success());
@@ -694,7 +722,7 @@ fn qualified_multi_term_queries_rank_the_leaf_and_accept_options_anywhere() {
 
     let qualified = cfind_command(&workspace, &index_path)
         .arg("Acme.Tools.Container.PaymentProcessor")
-        .args(["--limit", "1", "--type", "class", "--verbose"])
+        .args(["--limit", "1", "--type", "class"])
         .output()
         .unwrap();
     assert!(qualified.status.success());

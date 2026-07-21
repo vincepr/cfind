@@ -74,7 +74,6 @@ cfind GzipDecompress -f '\.cs$'
 cfind Config -f '^src/.*\.rs$'
 cfind --type
 cfind DatabaseContext --type class
-cfind DatabaseContext --type class --verbose
 cfind DatabaseContext --commit-url
 cfind DatabaseContext --quiet
 cfind --status
@@ -102,11 +101,12 @@ current index. Unknown kinds return an error containing the available values.
 
 C# namespace declarations are indexed as searchable `namespace` symbols.
 Containing namespaces and the full chain of enclosing indexed definitions are
-stored as qualified names and searched alongside short names. Pass `--verbose`
-to include a qualified name when it differs from the short name. Qualification
-uses language-appropriate separators (`.` for C#, JavaScript, and TypeScript;
-`::` for Rust). Rust `impl` blocks are not indexed definitions, so cfind does
-not invent an implementing-type qualification for methods inside them.
+stored as qualified names and searched alongside short names. Results include
+the qualified name by default when it differs from the short name.
+Qualification uses language-appropriate separators (`.` for C#, JavaScript,
+and TypeScript; `::` for Rust). Rust `impl` blocks are not indexed definitions,
+so cfind does not invent an implementing-type qualification for methods inside
+them.
 
 A query may contain multiple whitespace-separated terms. Quoted and unquoted
 whitespace have the same meaning: every term is scored against both the short
