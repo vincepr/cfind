@@ -36,6 +36,10 @@ pub(super) trait LanguageAdapter {
     fn grammar(&self, path: Option<&Path>) -> Language;
     fn definition<'tree>(&self, node: Node<'tree>) -> Option<Definition<'tree>>;
 
+    fn qualification_separator(&self) -> &'static str {
+        "."
+    }
+
     fn namespace_after(
         &self,
         _node: Node<'_>,
@@ -111,7 +115,15 @@ fn parse_source_with_adapter(
         .parse(source, None)
         .context("Tree-sitter did not produce a syntax tree")?;
     let mut symbols = Vec::new();
-    collect_symbols(tree.root_node(), source, adapter, None, None, &mut symbols);
+    let mut enclosing_definitions = Vec::new();
+    collect_symbols(
+        tree.root_node(),
+        source,
+        adapter,
+        &mut enclosing_definitions,
+        None,
+        &mut symbols,
+    );
     Ok(symbols)
 }
 
@@ -119,7 +131,7 @@ fn collect_symbols(
     node: Node<'_>,
     source: &[u8],
     adapter: &dyn LanguageAdapter,
-    parent: Option<&str>,
+    enclosing_definitions: &mut Vec<String>,
     namespace: Option<&str>,
     symbols: &mut Vec<Symbol>,
 ) {
@@ -128,8 +140,8 @@ fn collect_symbols(
         (!name.is_empty()).then_some((definition.kind, name))
     });
 
-    let mut next_parent = parent.map(str::to_owned);
     let mut next_namespace = namespace.map(str::to_owned);
+    let mut pushed_definition = false;
     if let Some((kind, name)) = definition {
         let start = node.start_position();
         let end = node.end_position();
@@ -139,8 +151,20 @@ fn collect_symbols(
         } else {
             name.clone()
         };
+        let qualified_name = if is_namespace {
+            indexed_name.clone()
+        } else {
+            let mut components = Vec::with_capacity(enclosing_definitions.len() + 2);
+            if let Some(namespace) = namespace {
+                components.push(namespace);
+            }
+            components.extend(enclosing_definitions.iter().map(String::as_str));
+            components.push(&name);
+            components.join(adapter.qualification_separator())
+        };
         symbols.push(Symbol {
             name: indexed_name.clone(),
+            qualified_name,
             kind: kind.to_owned(),
             namespace: if is_namespace {
                 None
@@ -154,13 +178,14 @@ fn collect_symbols(
             parent: if is_namespace {
                 None
             } else {
-                parent.map(str::to_owned)
+                enclosing_definitions.last().cloned()
             },
         });
         if is_namespace {
             next_namespace = Some(indexed_name);
         } else {
-            next_parent = Some(name);
+            enclosing_definitions.push(name);
+            pushed_definition = true;
         }
     }
 
@@ -171,13 +196,16 @@ fn collect_symbols(
             child,
             source,
             adapter,
-            next_parent.as_deref(),
+            enclosing_definitions,
             sibling_namespace.as_deref(),
             symbols,
         );
         if let Some(namespace) = adapter.namespace_after(child, source, next_namespace.as_deref()) {
             sibling_namespace = Some(namespace);
         }
+    }
+    if pushed_definition {
+        enclosing_definitions.pop();
     }
 }
 

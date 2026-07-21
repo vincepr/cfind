@@ -89,7 +89,9 @@ mod tests {
                 .any(|symbol| { symbol.name == "Acme.Data" && symbol.kind == "namespace" })
         );
         assert!(symbols.iter().any(|symbol| {
-            symbol.name == "DatabaseContext" && symbol.namespace.as_deref() == Some("Acme.Data")
+            symbol.name == "DatabaseContext"
+                && symbol.namespace.as_deref() == Some("Acme.Data")
+                && symbol.qualified_name == "Acme.Data.DatabaseContext"
         }));
     }
 
@@ -98,7 +100,29 @@ mod tests {
         let source = b"namespace Acme.Data;\npublic class DatabaseContext {}\n";
         let symbols = parse_source(source, SupportedLanguage::CSharp).unwrap();
         assert!(symbols.iter().any(|symbol| {
-            symbol.name == "DatabaseContext" && symbol.namespace.as_deref() == Some("Acme.Data")
+            symbol.name == "DatabaseContext"
+                && symbol.namespace.as_deref() == Some("Acme.Data")
+                && symbol.qualified_name == "Acme.Data.DatabaseContext"
         }));
+    }
+
+    #[test]
+    fn qualifies_nested_definitions_with_the_full_enclosing_chain() {
+        let source = br#"
+            namespace Acme.Tools {
+                public class Container {
+                    public class PaymentProcessor {
+                        public void Run() {}
+                    }
+                }
+            }
+        "#;
+        let symbols = parse_source(source, SupportedLanguage::CSharp).unwrap();
+        let run = symbols.iter().find(|symbol| symbol.name == "Run").unwrap();
+        assert_eq!(run.parent.as_deref(), Some("PaymentProcessor"));
+        assert_eq!(
+            run.qualified_name,
+            "Acme.Tools.Container.PaymentProcessor.Run"
+        );
     }
 }

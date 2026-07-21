@@ -1,5 +1,6 @@
 use std::{
     cmp::Ordering,
+    collections::HashSet,
     path::Path,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -7,7 +8,7 @@ use std::{
 use anyhow::{Context, Result};
 use regex::Regex;
 use rusqlite::Connection;
-use strsim::{jaro_winkler, normalized_levenshtein};
+use strsim::osa_distance;
 
 use crate::{
     SearchResult,
@@ -16,7 +17,10 @@ use crate::{
 
 struct RankedResult {
     result: SearchResult,
-    exactness: u8,
+    repository_root: String,
+    full_coverage: bool,
+    covered_terms: usize,
+    exact_short_terms: usize,
     similarity: u32,
     path_distance: usize,
 }
@@ -47,13 +51,40 @@ pub fn search_filtered(
     symbol_kind: Option<&str>,
     stale_after: Option<Duration>,
 ) -> Result<Vec<SearchResult>> {
-    let query_normalized = query.to_ascii_lowercase();
+    search_filtered_terms(
+        connection,
+        &[query.to_owned()],
+        from,
+        limit,
+        path_filter,
+        symbol_kind,
+        stale_after,
+    )
+}
+
+pub fn search_filtered_terms(
+    connection: &Connection,
+    query_parts: &[String],
+    from: &Path,
+    limit: usize,
+    path_filter: Option<&str>,
+    symbol_kind: Option<&str>,
+    stale_after: Option<Duration>,
+) -> Result<Vec<SearchResult>> {
+    let terms = query_terms(query_parts)?;
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let canonical_terms = terms
+        .iter()
+        .map(|term| canonical_name(term))
+        .collect::<Vec<_>>();
     let path_filter = path_filter
         .map(Regex::new)
         .transpose()
         .context("invalid --filter regex")?;
     let mut statement = connection.prepare(
-        "SELECT s.name, s.normalized_name, s.kind, s.parent, s.namespace,
+        "SELECT s.name, s.qualified_name, s.kind, s.parent, s.namespace,
                 s.start_line, s.end_line,
                 f.path, r.root, r.remote, r.revision, r.branch,
                 r.origin_branch, r.current_branch, r.last_fetch_at
@@ -85,7 +116,7 @@ pub fn search_filtered(
     for row in rows {
         let (
             name,
-            normalized,
+            qualified_name,
             kind,
             parent,
             namespace,
@@ -109,24 +140,40 @@ pub fn search_filtered(
         {
             continue;
         }
-        let exactness = if normalized == query_normalized {
-            3
-        } else if normalized.starts_with(&query_normalized) {
-            2
-        } else if normalized.contains(&query_normalized) {
-            1
-        } else {
-            0
-        };
-        let similarity = name_similarity(&query_normalized, &normalized);
-        if exactness == 0 && similarity < 3_500 {
+        let mut covered_terms = 0;
+        let mut exact_short_terms = 0;
+        let short_name = canonical_name(&name);
+        let qualified = canonical_name(&qualified_name);
+        let mut total_similarity = 0_u64;
+        for term in &canonical_terms {
+            let short_score = canonical_similarity(term, &short_name);
+            if short_score == 10_000 {
+                exact_short_terms += 1;
+            }
+            let qualified_score = if qualified_name == name {
+                0
+            } else {
+                match canonical_similarity(term, &qualified) {
+                    10_000 => 9_900,
+                    score => score * 95 / 100,
+                }
+            };
+            let term_score = short_score.max(qualified_score);
+            if term_score > 0 {
+                covered_terms += 1;
+                total_similarity += u64::from(term_score);
+            }
+        }
+        if covered_terms == 0 {
             continue;
         }
+        let similarity = (total_similarity / terms.len() as u64) as u32;
         let local_path = Path::new(&root).join(&relative_path);
         ranked.push(RankedResult {
             path_distance: path_distance(from, &local_path),
             result: SearchResult {
                 name,
+                qualified_name,
                 kind,
                 match_score: similarity.min(10_000) as u16,
                 namespace,
@@ -155,16 +202,28 @@ pub fn search_filtered(
                     )
                 }),
             },
-            exactness,
+            repository_root: root,
+            full_coverage: covered_terms == terms.len(),
+            covered_terms,
+            exact_short_terms,
             similarity,
         });
     }
     ranked.sort_by(compare_ranked);
-    Ok(ranked
-        .into_iter()
-        .take(limit)
-        .map(|item| item.result)
-        .collect())
+    let mut namespaces = HashSet::new();
+    let mut results = Vec::with_capacity(limit.min(ranked.len()));
+    for item in ranked {
+        if item.result.kind == "namespace"
+            && !namespaces.insert((item.repository_root, item.result.name.to_ascii_lowercase()))
+        {
+            continue;
+        }
+        results.push(item.result);
+        if results.len() == limit {
+            break;
+        }
+    }
+    Ok(results)
 }
 
 fn stale_git_state(
@@ -202,24 +261,130 @@ fn stale_git_state(
 
 fn compare_ranked(left: &RankedResult, right: &RankedResult) -> Ordering {
     right
-        .exactness
-        .cmp(&left.exactness)
-        .then_with(|| {
-            if left.exactness == 3 && right.exactness == 3 {
-                left.path_distance.cmp(&right.path_distance)
-            } else {
-                right.similarity.cmp(&left.similarity)
-            }
-        })
+        .full_coverage
+        .cmp(&left.full_coverage)
+        .then_with(|| right.covered_terms.cmp(&left.covered_terms))
+        .then_with(|| right.exact_short_terms.cmp(&left.exact_short_terms))
+        .then_with(|| right.similarity.cmp(&left.similarity))
         .then_with(|| left.path_distance.cmp(&right.path_distance))
         .then_with(|| left.result.local_path.cmp(&right.result.local_path))
         .then_with(|| left.result.start_line.cmp(&right.result.start_line))
 }
 
+#[cfg(test)]
 fn name_similarity(query: &str, candidate: &str) -> u32 {
-    let edit = normalized_levenshtein(query, candidate);
-    let jaro = jaro_winkler(query, candidate);
-    (edit.max(jaro) * 10_000.0).round() as u32
+    let query = canonical_name(query);
+    let candidate = canonical_name(candidate);
+    canonical_similarity(&query, &candidate)
+}
+
+fn canonical_similarity(query: &CanonicalName, candidate: &CanonicalName) -> u32 {
+    if query.text.is_empty() || candidate.text.is_empty() {
+        return 0;
+    }
+    if query.text == candidate.text {
+        return 10_000;
+    }
+
+    let query_chars = &query.characters;
+    let candidate_chars = &candidate.characters;
+    if candidate_chars.starts_with(query_chars) {
+        return 9_000 + length_closeness(query_chars.len(), candidate_chars.len(), 900);
+    }
+    if query_chars.len() >= 3
+        && let Some(position) = find_subslice(candidate_chars, query_chars)
+    {
+        let closeness = length_closeness(query_chars.len(), candidate_chars.len(), 900);
+        return if candidate.boundaries.contains(&position) {
+            8_000 + closeness
+        } else {
+            7_000 + closeness
+        };
+    }
+    if query_chars.len() >= 3
+        && ordered_boundary_subsequence(query_chars, candidate_chars, &candidate.boundaries)
+    {
+        return 6_000 + length_closeness(query_chars.len(), candidate_chars.len(), 500);
+    }
+
+    let typo_limit = match query_chars.len() {
+        0..=3 => 0,
+        4..=7 => 1,
+        _ => 2,
+    };
+    if typo_limit == 0 || query_chars.len().abs_diff(candidate_chars.len()) > typo_limit {
+        return 0;
+    }
+    let distance = osa_distance(&query.text, &candidate.text);
+    if distance > typo_limit {
+        return 0;
+    }
+    5_000 + ((typo_limit - distance) as u32 * 250)
+}
+
+struct CanonicalName {
+    text: String,
+    characters: Vec<char>,
+    boundaries: Vec<usize>,
+}
+
+fn canonical_name(value: &str) -> CanonicalName {
+    let mut text = String::new();
+    let mut boundaries = Vec::new();
+    let mut previous: Option<char> = None;
+    let mut position = 0;
+    for character in value.chars() {
+        if !character.is_alphanumeric() {
+            previous = None;
+            continue;
+        }
+        if previous.is_none()
+            || previous.is_some_and(|previous| {
+                (previous.is_lowercase() && character.is_uppercase())
+                    || (previous.is_alphabetic() != character.is_alphabetic())
+            })
+        {
+            boundaries.push(position);
+        }
+        for lowercase in character.to_lowercase() {
+            text.push(lowercase);
+            position += 1;
+        }
+        previous = Some(character);
+    }
+    let characters = text.chars().collect();
+    CanonicalName {
+        text,
+        characters,
+        boundaries,
+    }
+}
+
+fn length_closeness(query_length: usize, candidate_length: usize, range: u32) -> u32 {
+    (query_length.min(candidate_length) as u32 * range) / candidate_length.max(1) as u32
+}
+
+fn find_subslice(candidate: &[char], query: &[char]) -> Option<usize> {
+    candidate
+        .windows(query.len())
+        .position(|window| window == query)
+}
+
+fn ordered_boundary_subsequence(query: &[char], candidate: &[char], boundaries: &[usize]) -> bool {
+    let mut best = vec![None; query.len() + 1];
+    best[0] = Some(0);
+    for (position, candidate_character) in candidate.iter().enumerate() {
+        let boundary_score = usize::from(boundaries.contains(&position));
+        for query_position in (0..query.len()).rev() {
+            if candidate_character == &query[query_position]
+                && let Some(score) = best[query_position]
+            {
+                best[query_position + 1] =
+                    best[query_position + 1].max(Some(score + boundary_score));
+            }
+        }
+    }
+    best[query.len()].unwrap_or(0) >= 2
 }
 
 fn path_distance(from: &Path, target: &Path) -> usize {
@@ -239,11 +404,20 @@ fn path_distance(from: &Path, target: &Path) -> usize {
     from_components.len() + target_components.len() - (2 * common)
 }
 
-pub fn require_query(query: &str) -> Result<()> {
-    if query.trim().is_empty() {
+pub fn query_terms(query_parts: &[String]) -> Result<Vec<String>> {
+    let terms = query_parts
+        .iter()
+        .flat_map(|part| part.split_whitespace())
+        .filter(|term| term.chars().any(char::is_alphanumeric))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if query_parts.iter().all(|part| part.trim().is_empty()) {
         anyhow::bail!("search query cannot be empty");
     }
-    Ok(())
+    if terms.is_empty() {
+        anyhow::bail!("search query must contain a letter or number");
+    }
+    Ok(terms)
 }
 
 pub fn canonical_search_origin(path: &Path) -> Result<std::path::PathBuf> {
@@ -265,12 +439,64 @@ mod tests {
     }
 
     #[test]
-    fn similarity_includes_non_subsequence_matches() {
-        let query = "databasecontext";
-        assert!(name_similarity(query, "databaseentity") >= 3_500);
-        assert!(name_similarity(query, "marketplacecontext") >= 3_500);
+    fn matching_uses_explainable_score_tiers() {
+        assert_eq!(
+            name_similarity("DatabaseContext", "DatabaseContext"),
+            10_000
+        );
         assert!(
-            name_similarity(query, "databaseentity") > name_similarity(query, "marketplacecontext")
+            name_similarity("Database", "DatabaseContext")
+                > name_similarity("Context", "DatabaseContext")
+        );
+        assert!(
+            name_similarity("Context", "DatabaseContext")
+                > name_similarity("base", "DatabaseContext")
+        );
+        assert!(name_similarity("DbCtx", "DatabaseContext") > 0);
+        assert!(name_similarity("DatabsaeContext", "DatabaseContext") > 0);
+        assert!(name_similarity("DatabaseContexu", "DatabaseContext") > 0);
+        assert!(name_similarity("DatabaseContex", "DatabaseContext") > 0);
+    }
+
+    #[test]
+    fn matching_rejects_unrelated_and_short_coincidental_names() {
+        assert_eq!(
+            name_similarity("DefinitelyNoSuchSymbolQzx", "ArticleDto"),
+            0
+        );
+        assert_eq!(name_similarity("id", "Build"), 0);
+        assert_eq!(name_similarity("--", "DatabaseContext"), 0);
+    }
+
+    #[test]
+    fn query_terms_make_quoted_whitespace_equivalent_and_ignore_punctuation() {
+        assert_eq!(
+            query_terms(&[
+                "Acme Tools".to_owned(),
+                "--".to_owned(),
+                "Widget".to_owned()
+            ])
+            .unwrap(),
+            ["Acme", "Tools", "Widget"]
+        );
+        assert!(query_terms(&["::".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn zero_limit_returns_no_results() {
+        let connection = Connection::open_in_memory().unwrap();
+        assert!(
+            search_filtered_terms(
+                &connection,
+                &["Anything".to_owned()],
+                Path::new("/code"),
+                0,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 

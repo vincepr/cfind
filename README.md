@@ -65,6 +65,9 @@ warnings, and automatic age-based rebuilding.
 ```bash
 cfind --index
 cfind DatabaseContext
+cfind Acme Data DatabaseContext
+cfind "Acme Data DatabaseContext"
+cfind Acme.Data.DatabaseContext
 cfind DatabaseContext --index
 cfind DatabaseContext --from "$HOME/code/marketplace/api" --limit 10
 cfind GzipDecompress -f '\.cs$'
@@ -98,8 +101,19 @@ Use `--type class` (or another indexed kind) to restrict symbol kinds. Run
 current index. Unknown kinds return an error containing the available values.
 
 C# namespace declarations are indexed as searchable `namespace` symbols.
-Containing namespaces are stored on other C# symbols and included in output
-with `--verbose`.
+Containing namespaces and the full chain of enclosing indexed definitions are
+stored as qualified names and searched alongside short names. Pass `--verbose`
+to include a qualified name when it differs from the short name. Qualification
+uses language-appropriate separators (`.` for C#, JavaScript, and TypeScript;
+`::` for Rust). Rust `impl` blocks are not indexed definitions, so cfind does
+not invent an implementing-type qualification for methods inside them.
+
+A query may contain multiple whitespace-separated terms. Quoted and unquoted
+whitespace have the same meaning: every term is scored against both the short
+and qualified name, and candidates matching every term rank ahead of partial
+matches. Qualified-name matches receive a small ranking discount so an exact
+short-name match remains strongest. Terms containing only punctuation are
+ignored; a query with no letters or numbers is rejected.
 
 Indexing builds a fresh SQLite database beside the current index, parses tracked
 source files in parallel, and replaces the old index only after the new one is
@@ -107,13 +121,26 @@ complete. Each index records its canonical root, normalized language set,
 format version, and creation time. A configuration or version mismatch
 automatically triggers a fresh rebuild before searching.
 
-Search ranking prioritizes exact names. If multiple symbols have the exact same
-name, the result with the shortest directory distance from `--from` (the current
-directory by default) appears first. Remaining candidates are ranked by edit
-and Jaro-Winkler name similarity and then path proximity. This includes close
-non-subsequence names such as `DatabaseEntity` and `MarketplaceContext` for a
-`DatabaseContext` query. Each result includes a compact match score from `0` to
-`10000`; exact names score `10000`.
+Search ranking uses explicit match tiers: exact name, prefix, word-boundary
+substring, ordinary substring, boundary-aware ordered abbreviation, and a
+bounded typo match using optimal string alignment distance. This rejects broad
+similarity coincidences while retaining nearby transpositions, substitutions,
+and omissions. Each result includes a compact match score from `0` to `10000`;
+exact names score `10000`. Complete multi-term coverage, exact short-name
+matches, and score are compared before directory proximity. If otherwise equal,
+the result with the shortest directory distance from `--from` (the current
+directory by default) appears first; paths and source lines provide deterministic
+final tie-breakers.
+
+Repeated declarations of the same normalized namespace within one repository
+are collapsed after ranking and before `--limit` is applied. The best or nearest
+declaration is retained. Identically named namespaces in separate repositories
+and all non-namespace symbols remain separate results.
+
+A valid search that has no remaining results, including after `--filter` or
+`--type`, writes no result output to stdout, explains the miss on stderr, and
+exits with status `1`. Listing kinds with `cfind --type` remains a successful
+operation.
 
 GitHub and GitLab links use the repository's default or tracked branch to keep
 normal output compact. Pass `--commit-url` to prefer an immutable URL using the

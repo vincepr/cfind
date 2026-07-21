@@ -37,6 +37,10 @@ impl LanguageAdapter for RustAdapter {
         };
         Definition::named(node, kind)
     }
+
+    fn qualification_separator(&self) -> &'static str {
+        "::"
+    }
 }
 
 #[cfg(test)]
@@ -62,5 +66,10 @@ mod tests {
                 .iter()
                 .any(|symbol| symbol.name == "connect" && symbol.kind == "function")
         );
+        let connect = symbols
+            .iter()
+            .find(|symbol| symbol.name == "connect")
+            .unwrap();
+        assert_eq!(connect.qualified_name, "connect");
     }
 }

@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use cfind::{
     config::Config,
     index::{IndexState, index_state, open_database, rebuild},
-    search::{canonical_search_origin, distinct_symbol_kinds, require_query, search_filtered},
+    search::{canonical_search_origin, distinct_symbol_kinds, query_terms, search_filtered_terms},
 };
 use clap::Parser;
 
@@ -15,8 +15,9 @@ use clap::Parser;
     after_help = "Examples:\n  cfind DatabaseContext\n  cfind GzipDecompress -f '\\.cs$'\n  cfind --type\n  cfind --index\n  cfind --status\n\nEnvironment:\n  CFIND_ROOT=/path/to/code                         Required repository directory\n  CFIND_INDEX=/path/to/index.sqlite                Optional exact database path\n  CFIND_LANGUAGES=rust,javascript,typescript,csharp Optional languages (default: all)\n  CFIND_STALE_AFTER_HOURS=6                         Index warn age; rebuild 3x; fetch stale 12x; 0 disables"
 )]
 struct Cli {
-    /// Symbol name (fuzzy matching supported).
-    query: Option<String>,
+    /// Symbol name terms (fuzzy and qualified matching supported).
+    #[arg(value_name = "QUERY")]
+    query: Vec<String>,
     /// Rebuild first; exit with details when no query is given.
     #[arg(short, long, conflicts_with = "status")]
     index: bool,
@@ -41,7 +42,7 @@ struct Cli {
     /// Omit repository URLs.
     #[arg(short, long)]
     quiet: bool,
-    /// Include containing namespaces.
+    /// Include qualified names.
     #[arg(short, long)]
     verbose: bool,
 }
@@ -56,7 +57,7 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::from_env()?;
-    if cli.index && cli.query.is_none() {
+    if cli.index && cli.query.is_empty() {
         return run_index(&config);
     }
     if cli.status {
@@ -64,7 +65,7 @@ fn run() -> Result<()> {
     }
 
     let list_types = cli.symbol_type.as_deref() == Some("");
-    if cli.query.is_none() && !list_types {
+    if cli.query.is_empty() && !list_types {
         bail!("query required (or use --type to list indexed kinds)");
     }
     let warn_about_age = if cli.index {
@@ -89,10 +90,8 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    let Some(query) = cli.query else {
-        bail!("query required (or use --type to list indexed kinds)");
-    };
-    require_query(&query)?;
+    let terms = query_terms(&cli.query)?;
+    let query_label = terms.join(" ");
     let symbol_type = cli
         .symbol_type
         .as_deref()
@@ -109,15 +108,18 @@ fn run() -> Result<()> {
         &cli.from
             .unwrap_or(env::current_dir().context("could not determine current directory")?),
     )?;
-    let results = search_filtered(
+    let results = search_filtered_terms(
         &connection,
-        &query,
+        &terms,
         &from,
         cli.limit,
         cli.filter.as_deref(),
         symbol_type.as_deref(),
         (!config.stale_after.is_zero()).then_some(config.fetch_stale_after()),
     )?;
+    if results.is_empty() {
+        bail!("no symbols matched '{query_label}' with the selected filters");
+    }
     for result in results {
         let parent = result
             .parent
@@ -149,10 +151,8 @@ fn run() -> Result<()> {
         if let Some(url) = url {
             println!("  {url}");
         }
-        if cli.verbose
-            && let Some(namespace) = result.namespace.as_deref()
-        {
-            println!("  {namespace}");
+        if cli.verbose && result.qualified_name != result.name {
+            println!("  {}", result.qualified_name);
         }
         println!();
     }

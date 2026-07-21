@@ -60,5 +60,8 @@ mod tests {
         );
         assert!(symbols.iter().any(|symbol| symbol.name == "loadDatabase"));
         assert!(symbols.iter().all(|symbol| symbol.name != "timeout"));
+        assert!(symbols.iter().any(|symbol| {
+            symbol.name == "connect" && symbol.qualified_name == "DatabaseContext.connect"
+        }));
     }
 }

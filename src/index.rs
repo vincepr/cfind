@@ -24,7 +24,7 @@ pub struct IndexStats {
     pub elapsed_ms: u128,
 }
 
-const INDEX_VERSION: u64 = 7;
+const INDEX_VERSION: u64 = 8;
 
 struct ParsedFile {
     path: String,
@@ -80,6 +80,8 @@ fn create_database(path: &Path) -> Result<Connection> {
              file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
              name TEXT NOT NULL,
              normalized_name TEXT NOT NULL,
+             qualified_name TEXT NOT NULL,
+             normalized_qualified_name TEXT NOT NULL,
              kind TEXT NOT NULL,
              namespace TEXT,
              start_line INTEGER NOT NULL,
@@ -89,6 +91,8 @@ fn create_database(path: &Path) -> Result<Connection> {
              parent TEXT
          );
          CREATE INDEX IF NOT EXISTS symbols_normalized_name ON symbols(normalized_name);
+         CREATE INDEX IF NOT EXISTS symbols_normalized_qualified_name
+             ON symbols(normalized_qualified_name);
          CREATE INDEX IF NOT EXISTS symbols_file_id ON symbols(file_id);
          CREATE TABLE IF NOT EXISTS index_metadata (
              key TEXT PRIMARY KEY,
@@ -322,15 +326,18 @@ fn index_repository(
         )?;
         let mut insert = transaction.prepare_cached(
             "INSERT INTO symbols(
-                file_id, name, normalized_name, kind, namespace, start_line,
+                file_id, name, normalized_name, qualified_name,
+                normalized_qualified_name, kind, namespace, start_line,
                 start_column, end_line, end_column, parent
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )?;
         for symbol in file.symbols {
             insert.execute(params![
                 file_id,
                 symbol.name,
                 symbol.name.to_ascii_lowercase(),
+                symbol.qualified_name,
+                symbol.qualified_name.to_ascii_lowercase(),
                 symbol.kind,
                 symbol.namespace,
                 symbol.start_line,
@@ -488,6 +495,27 @@ mod tests {
         let config = test_config(temporary.path(), Duration::from_secs(60));
         rebuild(&config).unwrap();
         let connection = open_database(&config.index_path).unwrap();
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM index_metadata WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "8");
+        let columns = connection
+            .prepare("PRAGMA table_info(symbols)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "qualified_name"));
+        assert!(
+            columns
+                .iter()
+                .any(|column| column == "normalized_qualified_name")
+        );
         connection
             .execute(
                 "UPDATE index_metadata SET value = '0' WHERE key = 'version'",

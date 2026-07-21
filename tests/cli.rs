@@ -309,6 +309,53 @@ fn language_configuration_change_rebuilds_the_index() {
 }
 
 #[test]
+fn index_format_change_rebuilds_before_searching() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let index_path = temporary.path().join("indexes/workspace.sqlite");
+    fs::create_dir_all(workspace.join("src")).unwrap();
+    run_git(temporary.path(), &["init", workspace.to_str().unwrap()]);
+    fs::write(workspace.join("src/lib.rs"), "pub struct FormatSymbol;\n").unwrap();
+    run_git(&workspace, &["add", "src/lib.rs"]);
+
+    let output = cfind_command(&workspace, &index_path)
+        .arg("FormatSymbol")
+        .env("CFIND_LANGUAGES", "rust")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let database = open_database(&index_path).unwrap();
+    database
+        .execute(
+            "UPDATE index_metadata SET value = '7' WHERE key = 'version'",
+            [],
+        )
+        .unwrap();
+    drop(database);
+
+    let output = cfind_command(&workspace, &index_path)
+        .arg("FormatSymbol")
+        .env("CFIND_LANGUAGES", "rust")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Index configuration changed"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let database = open_database(&index_path).unwrap();
+    let version: String = database
+        .query_row(
+            "SELECT value FROM index_metadata WHERE key = 'version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, "8");
+}
+
+#[test]
 fn old_index_warns_then_rebuilds_after_three_warning_periods() {
     let temporary = TempDir::new().unwrap();
     let workspace = temporary.path().join("workspace");
@@ -506,10 +553,13 @@ fn search_filters_results_by_path_regex() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout.contains("namespace Acme.Data"), "{stdout}");
-    assert!(stdout.contains("\n  Acme.Data\n\n"), "{stdout}");
+    assert!(
+        stdout.contains("\n  Acme.Data.SharedSymbol\n\n"),
+        "{stdout}"
+    );
     let path = stdout.find("src/Shared.cs:2").unwrap();
     let url = stdout.find("https://github.com/acme/shared/").unwrap();
-    let namespace = stdout.rfind("\n  Acme.Data").unwrap();
+    let namespace = stdout.rfind("\n  Acme.Data.SharedSymbol").unwrap();
     assert!(path < url && url < namespace, "{stdout}");
 
     let output = cfind_command(&workspace, &index_path)
@@ -530,6 +580,203 @@ fn search_filters_results_by_path_regex() {
     assert!(
         stderr.contains("available types: class, namespace, struct"),
         "{stderr}"
+    );
+}
+
+#[test]
+fn no_match_is_a_quiet_stdout_failure_even_after_filtering() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let index_path = temporary.path().join("indexes/workspace.sqlite");
+    fs::create_dir_all(workspace.join("src")).unwrap();
+    run_git(temporary.path(), &["init", workspace.to_str().unwrap()]);
+    fs::write(workspace.join("src/lib.rs"), "pub struct PresentSymbol;\n").unwrap();
+    run_git(&workspace, &["add", "src/lib.rs"]);
+
+    let output = cfind_command(&workspace, &index_path)
+        .arg("DefinitelyNoSuchSymbolQzx")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no symbols matched"), "{stderr}");
+    assert!(stderr.contains("DefinitelyNoSuchSymbolQzx"), "{stderr}");
+
+    let output = cfind_command(&workspace, &index_path)
+        .args(["PresentSymbol", "--filter", r"\.cs$"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no symbols matched"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn qualified_multi_term_queries_rank_the_leaf_and_accept_options_anywhere() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let index_path = temporary.path().join("indexes/workspace.sqlite");
+    fs::create_dir_all(workspace.join("src")).unwrap();
+    run_git(temporary.path(), &["init", workspace.to_str().unwrap()]);
+    fs::write(
+        workspace.join("src/Payments.cs"),
+        "namespace Acme.Tools { public class Container { public class PaymentProcessor {} } }\n",
+    )
+    .unwrap();
+    run_git(&workspace, &["add", "src/Payments.cs"]);
+
+    let output = cfind_command(&workspace, &index_path)
+        .args([
+            "--limit",
+            "1",
+            "Acme",
+            "Tools",
+            "PaymentProcessor",
+            "--type",
+            "class",
+            "--verbose",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let unquoted = String::from_utf8_lossy(&output.stdout);
+    assert!(unquoted.contains("class  PaymentProcessor"), "{unquoted}");
+    assert!(
+        unquoted.contains("Acme.Tools.Container.PaymentProcessor"),
+        "{unquoted}"
+    );
+
+    let quoted = cfind_command(&workspace, &index_path)
+        .arg("Acme Tools PaymentProcessor")
+        .args(["--limit", "1", "--type", "class", "--verbose"])
+        .output()
+        .unwrap();
+    assert!(quoted.status.success());
+    assert_eq!(output.stdout, quoted.stdout);
+
+    let qualified = cfind_command(&workspace, &index_path)
+        .arg("Acme.Tools.Container.PaymentProcessor")
+        .args(["--limit", "1", "--type", "class", "--verbose"])
+        .output()
+        .unwrap();
+    assert!(qualified.status.success());
+    assert!(
+        String::from_utf8_lossy(&qualified.stdout).contains("class  PaymentProcessor"),
+        "{}",
+        String::from_utf8_lossy(&qualified.stdout)
+    );
+}
+
+#[test]
+fn namespace_results_are_deduplicated_per_repository_before_limit() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let first = workspace.join("first");
+    let second = workspace.join("second");
+    let index_path = temporary.path().join("indexes/workspace.sqlite");
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir_all(&second).unwrap();
+    run_git(&workspace, &["init", first.to_str().unwrap()]);
+    run_git(&workspace, &["init", second.to_str().unwrap()]);
+    fs::write(first.join("a.cs"), "namespace Acme.Shared;\n").unwrap();
+    fs::write(first.join("b.cs"), "namespace Acme.Shared;\n").unwrap();
+    fs::write(first.join("joined.cs"), "namespace AcmeShared;\n").unwrap();
+    fs::write(first.join("c.cs"), "namespace Acme.SharedOther;\n").unwrap();
+    fs::write(
+        first.join("methods.cs"),
+        "class First { void Run() {} } class Second { void Run() {} }\n",
+    )
+    .unwrap();
+    fs::write(
+        first.join("ctor-a.cs"),
+        "partial class Duplicate { Duplicate() {} }\n",
+    )
+    .unwrap();
+    fs::write(
+        first.join("ctor-b.cs"),
+        "partial class Duplicate { Duplicate() {} }\n",
+    )
+    .unwrap();
+    fs::write(second.join("d.cs"), "namespace Acme.Shared;\n").unwrap();
+    run_git(
+        &first,
+        &[
+            "add",
+            "a.cs",
+            "b.cs",
+            "joined.cs",
+            "c.cs",
+            "methods.cs",
+            "ctor-a.cs",
+            "ctor-b.cs",
+        ],
+    );
+    run_git(&second, &["add", "d.cs"]);
+
+    let output = cfind_command(&workspace, &index_path)
+        .args(["Acme", "--type", "namespace", "--limit", "10"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.matches("namespace  Acme.Shared  ").count(),
+        2,
+        "{stdout}"
+    );
+    assert_eq!(
+        stdout.matches("namespace  Acme.SharedOther  ").count(),
+        1,
+        "{stdout}"
+    );
+    assert_eq!(
+        stdout.matches("namespace  AcmeShared  ").count(),
+        1,
+        "{stdout}"
+    );
+    assert!(stdout.contains("first/a.cs"), "{stdout}");
+    assert!(!stdout.contains("first/b.cs"), "{stdout}");
+
+    let output = cfind_command(&workspace, &index_path)
+        .args(["Acme.Shared", "--type", "namespace", "--limit", "4"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Acme.SharedOther"), "{stdout}");
+    assert!(stdout.contains("Acme.Shared"), "{stdout}");
+
+    let output = cfind_command(&workspace, &index_path)
+        .args(["Run", "--type", "method"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout)
+            .matches("method  Run")
+            .count(),
+        2
+    );
+
+    let output = cfind_command(&workspace, &index_path)
+        .args(["Duplicate", "--type", "constructor"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout)
+            .matches("constructor  Duplicate")
+            .count(),
+        2
     );
 }
 

@@ -58,6 +58,7 @@ mod tests {
     fn extracts_interfaces_and_arrow_functions() {
         let source = br#"
             interface DatabaseEntity { id: number }
+            class DatabaseContext { connect(): void {} }
             declare function createDatabase(): DatabaseEntity;
             const loadDatabase = () => 1;
         "#;
@@ -77,5 +78,8 @@ mod tests {
                 .iter()
                 .any(|symbol| symbol.name == "createDatabase" && symbol.kind == "function")
         );
+        assert!(symbols.iter().any(|symbol| {
+            symbol.name == "connect" && symbol.qualified_name == "DatabaseContext.connect"
+        }));
     }
 }

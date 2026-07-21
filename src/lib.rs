@@ -9,6 +9,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Symbol {
     pub name: String,
+    pub qualified_name: String,
     pub kind: String,
     pub namespace: Option<String>,
     pub start_line: usize,
@@ -21,6 +22,7 @@ pub struct Symbol {
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub name: String,
+    pub qualified_name: String,
     pub kind: String,
     pub match_score: u16,
     pub namespace: Option<String>,
