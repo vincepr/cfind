@@ -26,9 +26,7 @@ impl LanguageAdapter for CSharpAdapter {
     fn definition<'tree>(&self, node: Node<'tree>) -> Option<Definition<'tree>> {
         let kind = match node.kind() {
             "namespace_declaration" | "file_scoped_namespace_declaration" => "namespace",
-            "class_declaration" => "class",
-            "record_declaration" => "record",
-            "struct_declaration" => "struct",
+            "class_declaration" | "record_declaration" | "struct_declaration" => "class",
             "interface_declaration" => "interface",
             "enum_declaration" => "enum",
             "delegate_declaration" => "delegate",
@@ -63,10 +61,11 @@ mod tests {
     use crate::{config::SupportedLanguage, language::parse_source};
 
     #[test]
-    fn extracts_records_methods_and_namespaces() {
+    fn normalizes_classes_records_and_structs_to_class() {
         let source = br#"
             namespace Acme.Data {
                 public record DatabaseEntity(int Id);
+                public struct DatabaseValue {}
                 public class DatabaseContext {
                     public void Save() {}
                 }
@@ -76,7 +75,17 @@ mod tests {
         assert!(
             symbols
                 .iter()
-                .any(|symbol| symbol.name == "DatabaseEntity" && symbol.kind == "record")
+                .any(|symbol| symbol.name == "DatabaseEntity" && symbol.kind == "class")
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|symbol| symbol.name == "DatabaseValue" && symbol.kind == "class")
+        );
+        assert!(
+            symbols
+                .iter()
+                .all(|symbol| !matches!(symbol.kind.as_str(), "record" | "struct"))
         );
         assert!(
             symbols

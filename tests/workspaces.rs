@@ -52,17 +52,15 @@ fn workspaces_have_independent_indexes_and_ignore_untracked_files() {
             .iter()
             .all(|result| result.name != "DatabaseContext")
     );
-    assert_eq!(
-        search(
-            &csharp_database,
-            "MarketplaceContext",
-            &csharp_workspace,
-            10
-        )
-        .unwrap()[0]
-            .name,
-        "MarketplaceContext"
-    );
+    let csharp_results = search(
+        &csharp_database,
+        "MarketplaceContext",
+        &csharp_workspace,
+        10,
+    )
+    .unwrap();
+    assert_eq!(csharp_results[0].name, "MarketplaceContext");
+    assert_eq!(csharp_results[0].kind, "class");
 }
 
 #[test]

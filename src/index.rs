@@ -24,7 +24,7 @@ pub struct IndexStats {
     pub elapsed_ms: u128,
 }
 
-const INDEX_VERSION: u64 = 8;
+const INDEX_VERSION: u64 = 9;
 
 struct ParsedFile {
     path: String,
@@ -502,7 +502,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "8");
+        assert_eq!(version, "9");
         let columns = connection
             .prepare("PRAGMA table_info(symbols)")
             .unwrap()

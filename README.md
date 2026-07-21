@@ -108,6 +108,9 @@ retain their precise symbol-level behavior.
 Use `--type class` (or another indexed kind) to restrict symbol kinds. Run
 `cfind --type` without a query or value to list every distinct kind in the
 current index. Unknown kinds return an error containing the available values.
+C# class, record, and struct declarations all use the `class` kind so searches
+can treat them as the same type-level concept. Rust structs retain the `struct`
+kind.
 
 C# namespace declarations are indexed as searchable `namespace` symbols.
 Containing namespaces and the full chain of enclosing indexed definitions are

@@ -365,7 +365,7 @@ fn index_format_change_rebuilds_before_searching() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "8");
+    assert_eq!(version, "9");
 }
 
 #[test]
@@ -521,7 +521,7 @@ fn search_filters_results_by_path_regex() {
     .unwrap();
     fs::write(
         workspace.join("src/Shared.cs"),
-        "namespace Acme.Data;\npublic class SharedSymbol {}\n",
+        "namespace Acme.Data;\npublic class SharedSymbol {}\npublic record SharedRecord;\npublic struct SharedValue {}\n",
     )
     .unwrap();
     run_git(&workspace, &["add", "src/shared.rs", "src/Shared.cs"]);
@@ -542,6 +542,16 @@ fn search_filters_results_by_path_regex() {
         stdout.contains("\n  Acme.Data.SharedSymbol\n\n"),
         "{stdout}"
     );
+
+    for name in ["SharedRecord", "SharedValue"] {
+        let output = cfind_command(&workspace, &index_path)
+            .args([name, "--type", "class", "--quiet"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(&format!("class  {name}")), "{stdout}");
+    }
     let path = stdout.find("src/Shared.cs:2").unwrap();
     let url = stdout.find("https://github.com/acme/shared/").unwrap();
     let qualified_name = stdout.rfind("\n  Acme.Data.SharedSymbol").unwrap();
