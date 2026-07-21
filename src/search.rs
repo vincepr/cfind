@@ -440,22 +440,42 @@ mod tests {
 
     #[test]
     fn matching_uses_explainable_score_tiers() {
-        assert_eq!(
-            name_similarity("DatabaseContext", "DatabaseContext"),
-            10_000
-        );
-        assert!(
-            name_similarity("Database", "DatabaseContext")
-                > name_similarity("Context", "DatabaseContext")
-        );
-        assert!(
-            name_similarity("Context", "DatabaseContext")
-                > name_similarity("base", "DatabaseContext")
-        );
-        assert!(name_similarity("DbCtx", "DatabaseContext") > 0);
-        assert!(name_similarity("DatabsaeContext", "DatabaseContext") > 0);
-        assert!(name_similarity("DatabaseContexu", "DatabaseContext") > 0);
-        assert!(name_similarity("DatabaseContex", "DatabaseContext") > 0);
+        let exact = name_similarity("DatabaseContext", "DatabaseContext");
+        let prefix = name_similarity("Database", "DatabaseContext");
+        let boundary_substring = name_similarity("Context", "DatabaseContext");
+        let ordinary_substring = name_similarity("base", "DatabaseContext");
+        let abbreviation = name_similarity("DbCtx", "DatabaseContext");
+        let typo = name_similarity("DatabsaeContext", "DatabaseContext");
+
+        assert_eq!(exact, 10_000);
+        assert!((9_000..10_000).contains(&prefix));
+        assert!((8_000..9_000).contains(&boundary_substring));
+        assert!((7_000..8_000).contains(&ordinary_substring));
+        assert!((6_000..7_000).contains(&abbreviation));
+        assert!((5_000..6_000).contains(&typo));
+        assert!(exact > prefix);
+        assert!(prefix > boundary_substring);
+        assert!(boundary_substring > ordinary_substring);
+        assert!(ordinary_substring > abbreviation);
+        assert!(abbreviation > typo);
+    }
+
+    #[test]
+    fn typo_matching_is_bounded_by_query_length_and_distance() {
+        assert_eq!(osa_distance("Cot", "Cat"), 1);
+        assert_eq!(name_similarity("Cot", "Cat"), 0);
+
+        assert_eq!(osa_distance("Artcle", "Article"), 1);
+        assert!(name_similarity("Artcle", "Article") > 0);
+
+        assert_eq!(osa_distance("abxdefyhij", "abcdefghij"), 2);
+        assert!(name_similarity("abxdefyhij", "abcdefghij") > 0);
+
+        assert_eq!(osa_distance("abxdefyhiz", "abcdefghij"), 3);
+        assert_eq!(name_similarity("abxdefyhiz", "abcdefghij"), 0);
+
+        assert_eq!(osa_distance("DatabaseContexts", "DatabaseContext"), 1);
+        assert!(name_similarity("DatabaseContexts", "DatabaseContext") > 0);
     }
 
     #[test]
@@ -498,6 +518,113 @@ mod tests {
             .unwrap()
             .is_empty()
         );
+    }
+
+    #[test]
+    fn multi_term_ranking_is_order_independent_and_keeps_partial_matches() {
+        let connection = search_fixture();
+        let forward = search_filtered_terms(
+            &connection,
+            &["Acme".to_owned(), "Widget".to_owned()],
+            Path::new("/work"),
+            10,
+            None,
+            Some("class"),
+            None,
+        )
+        .unwrap();
+        let reverse = search_filtered_terms(
+            &connection,
+            &["Widget".to_owned(), "Acme".to_owned()],
+            Path::new("/work"),
+            10,
+            None,
+            Some("class"),
+            None,
+        )
+        .unwrap();
+
+        let forward_names = forward
+            .iter()
+            .map(|result| result.name.as_str())
+            .collect::<Vec<_>>();
+        let reverse_names = reverse
+            .iter()
+            .map(|result| result.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(forward_names, reverse_names);
+        assert_eq!(forward_names[0], "Widget");
+        assert!(forward_names.contains(&"AcmeOnly"));
+        assert_eq!(forward_names.last(), Some(&"AcmeOnly"));
+
+        let short_exact = search_filtered_terms(
+            &connection,
+            &["Widget".to_owned()],
+            Path::new("/work"),
+            10,
+            None,
+            Some("class"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(short_exact[0].name, "Widget");
+        assert_eq!(short_exact[1].name, "Tools");
+    }
+
+    fn search_fixture() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE repositories (
+                     id INTEGER PRIMARY KEY,
+                     root TEXT NOT NULL,
+                     remote TEXT,
+                     revision TEXT NOT NULL,
+                     branch TEXT,
+                     origin_branch TEXT,
+                     current_branch TEXT,
+                     last_fetch_at INTEGER
+                 );
+                 CREATE TABLE files (
+                     id INTEGER PRIMARY KEY,
+                     repository_id INTEGER NOT NULL,
+                     path TEXT NOT NULL
+                 );
+                 CREATE TABLE symbols (
+                     file_id INTEGER NOT NULL,
+                     name TEXT NOT NULL,
+                     qualified_name TEXT NOT NULL,
+                     kind TEXT NOT NULL,
+                     parent TEXT,
+                     namespace TEXT,
+                     start_line INTEGER NOT NULL,
+                     end_line INTEGER NOT NULL
+                 );
+                 INSERT INTO repositories(id, root, revision)
+                     VALUES (1, '/work/repo', 'abc123');",
+            )
+            .unwrap();
+        for (id, name, qualified_name) in [
+            (1, "Widget", "Acme.Tools.Widget"),
+            (2, "Tools", "Acme.Widget.Tools"),
+            (3, "AcmeOnly", "AcmeOnly"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO files(id, repository_id, path) VALUES (?1, 1, ?2)",
+                    rusqlite::params![id, format!("src/{name}.cs")],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO symbols(
+                         file_id, name, qualified_name, kind, start_line, end_line
+                     ) VALUES (?1, ?2, ?3, 'class', 1, 1)",
+                    rusqlite::params![id, name, qualified_name],
+                )
+                .unwrap();
+        }
+        connection
     }
 
     #[test]

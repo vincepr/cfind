@@ -591,7 +591,12 @@ fn no_match_is_a_quiet_stdout_failure_even_after_filtering() {
     fs::create_dir_all(workspace.join("src")).unwrap();
     run_git(temporary.path(), &["init", workspace.to_str().unwrap()]);
     fs::write(workspace.join("src/lib.rs"), "pub struct PresentSymbol;\n").unwrap();
-    run_git(&workspace, &["add", "src/lib.rs"]);
+    fs::write(
+        workspace.join("src/Other.cs"),
+        "public class OtherClass {}\n",
+    )
+    .unwrap();
+    run_git(&workspace, &["add", "src/lib.rs", "src/Other.cs"]);
 
     let output = cfind_command(&workspace, &index_path)
         .arg("DefinitelyNoSuchSymbolQzx")
@@ -611,6 +616,30 @@ fn no_match_is_a_quiet_stdout_failure_even_after_filtering() {
     assert!(output.stdout.is_empty());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("no symbols matched"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = cfind_command(&workspace, &index_path)
+        .args(["PresentSymbol", "--type", "class"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no symbols matched"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = cfind_command(&workspace, &index_path)
+        .arg("::")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("must contain a letter or number"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -685,12 +714,17 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
     let index_path = temporary.path().join("indexes/workspace.sqlite");
     fs::create_dir_all(&first).unwrap();
     fs::create_dir_all(&second).unwrap();
+    fs::create_dir_all(first.join("near")).unwrap();
+    fs::create_dir_all(first.join("far")).unwrap();
     run_git(&workspace, &["init", first.to_str().unwrap()]);
     run_git(&workspace, &["init", second.to_str().unwrap()]);
     fs::write(first.join("a.cs"), "namespace Acme.Shared;\n").unwrap();
     fs::write(first.join("b.cs"), "namespace Acme.Shared;\n").unwrap();
+    fs::write(first.join("case.cs"), "namespace ACME.SHARED;\n").unwrap();
     fs::write(first.join("joined.cs"), "namespace AcmeShared;\n").unwrap();
     fs::write(first.join("c.cs"), "namespace Acme.SharedOther;\n").unwrap();
+    fs::write(first.join("near/location.cs"), "namespace Acme.Location;\n").unwrap();
+    fs::write(first.join("far/location.cs"), "namespace Acme.Location;\n").unwrap();
     fs::write(
         first.join("methods.cs"),
         "class First { void Run() {} } class Second { void Run() {} }\n",
@@ -713,8 +747,11 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
             "add",
             "a.cs",
             "b.cs",
+            "case.cs",
             "joined.cs",
             "c.cs",
+            "near/location.cs",
+            "far/location.cs",
             "methods.cs",
             "ctor-a.cs",
             "ctor-b.cs",
@@ -743,6 +780,12 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
         1,
         "{stdout}"
     );
+    assert_eq!(
+        stdout.matches("namespace  Acme.Location  ").count(),
+        1,
+        "{stdout}"
+    );
+    assert!(!stdout.contains("namespace  ACME.SHARED"), "{stdout}");
     assert!(stdout.contains("first/a.cs"), "{stdout}");
     assert!(!stdout.contains("first/b.cs"), "{stdout}");
 
@@ -754,6 +797,20 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Acme.SharedOther"), "{stdout}");
     assert!(stdout.contains("Acme.Shared"), "{stdout}");
+
+    let from = first.join("far");
+    let output = cfind_command(&workspace, &index_path)
+        .args(["Acme.Location", "--type", "namespace", "--limit", "1"])
+        .arg("--from")
+        .arg(&from)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&first.join("far/location.cs").display().to_string()),
+        "{stdout}"
+    );
 
     let output = cfind_command(&workspace, &index_path)
         .args(["Run", "--type", "method"])
