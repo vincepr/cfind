@@ -3,12 +3,16 @@ mod javascript;
 mod rust;
 mod typescript;
 
-use std::{fs, path::Path};
+use std::{cell::Cell, fs, path::Path};
 
 use anyhow::{Context, Result};
-use tree_sitter::{Language, Node, Parser};
+use tree_sitter::{Language, Node, ParseOptions, ParseState, Parser, Point};
 
 use crate::{Symbol, config::SupportedLanguage};
+
+/// Parse steps one file may spend before it is skipped. Token-dense generated
+/// files (inline byte arrays) cost gigabytes of syntax tree for no symbols.
+const MAX_PARSE_STEPS: u64 = 100_000;
 
 use self::{
     csharp::CSharpAdapter, javascript::JavaScriptAdapter, rust::RustAdapter,
@@ -111,9 +115,27 @@ fn parse_source_with_adapter(
     let adapter = adapter(language);
     let mut parser = Parser::new();
     parser.set_language(&adapter.grammar(path))?;
-    let tree = parser
-        .parse(source, None)
-        .context("Tree-sitter did not produce a syntax tree")?;
+    let steps = Cell::new(0_u64);
+    let mut progress = |_: &ParseState| {
+        steps.set(steps.get() + 1);
+        steps.get() > MAX_PARSE_STEPS
+    };
+    let mut read = |byte: usize, _: Point| source.get(byte..).unwrap_or_default();
+    let tree = parser.parse_with_options(
+        &mut read,
+        None,
+        Some(ParseOptions::new().progress_callback(&mut progress)),
+    );
+    let Some(tree) = tree else {
+        if steps.get() > MAX_PARSE_STEPS {
+            eprintln!(
+                "warning: skipping {} after {MAX_PARSE_STEPS} parse steps",
+                path.map_or("<source>".into(), |path| path.display().to_string())
+            );
+            return Ok(Vec::new());
+        }
+        anyhow::bail!("Tree-sitter did not produce a syntax tree");
+    };
     let mut symbols = Vec::new();
     let mut enclosing_definitions = Vec::new();
     collect_symbols(
@@ -216,5 +238,32 @@ pub(super) fn qualify_namespace(parent: Option<&str>, name: &str) -> String {
         }
         Some(parent) => format!("{parent}.{name}"),
         None => name.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_dense_files_are_skipped_instead_of_exhausting_memory() {
+        let elements = (0..800_000)
+            .map(|value| (value % 256).to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let dense = format!("class ImageData {{ public static byte[] Bytes = [{elements}]; }}");
+
+        let symbols = parse_source(dense.as_bytes(), SupportedLanguage::CSharp).unwrap();
+
+        assert!(symbols.is_empty());
+    }
+
+    #[test]
+    fn files_within_the_parse_budget_still_yield_symbols() {
+        let source = b"class Small { public static byte[] Bytes = [1, 2, 3]; }";
+
+        let symbols = parse_source(source, SupportedLanguage::CSharp).unwrap();
+
+        assert!(symbols.iter().any(|symbol| symbol.name == "Small"));
     }
 }

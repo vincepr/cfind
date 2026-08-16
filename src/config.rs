@@ -13,7 +13,6 @@ pub const INDEX_ENV: &str = "CFIND_INDEX";
 pub const STALE_AFTER_HOURS_ENV: &str = "CFIND_STALE_AFTER_HOURS";
 const DEFAULT_STALE_AFTER_HOURS: u64 = 6;
 const AUTOMATIC_REBUILD_MULTIPLIER: u32 = 3;
-const FETCH_STALE_MULTIPLIER: u32 = 12;
 #[cfg(not(target_os = "windows"))]
 const ROOT_REQUIRED_MESSAGE: &str = "CFIND_ROOT is required; set it to the directory containing your repositories, for example: export CFIND_ROOT=\"$HOME/code\"";
 #[cfg(target_os = "windows")]
@@ -111,11 +110,6 @@ impl Config {
     pub fn automatic_rebuild_after(&self) -> Duration {
         self.stale_after
             .saturating_mul(AUTOMATIC_REBUILD_MULTIPLIER)
-    }
-
-    /// Returns the cached Git fetch age that produces a stale-state annotation.
-    pub fn fetch_stale_after(&self) -> Duration {
-        self.stale_after.saturating_mul(FETCH_STALE_MULTIPLIER)
     }
 }
 

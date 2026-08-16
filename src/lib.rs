@@ -36,9 +36,10 @@ pub struct SearchResult {
     pub git_state: Option<String>,
 }
 
+/// One printed row: the best symbol of a collapsed group, and how many symbols
+/// that group stands for.
 #[derive(Debug, Clone)]
-pub struct RoughSearchResult {
+pub struct CollapsedResult {
     pub representative: SearchResult,
     pub match_count: usize,
-    pub shared_directory: Option<PathBuf>,
 }

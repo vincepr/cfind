@@ -1,17 +1,17 @@
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    collections::HashMap,
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use regex::Regex;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::Connection;
 use strsim::osa_distance;
 
 use crate::{
-    RoughSearchResult, SearchResult,
+    CollapsedResult, SearchResult,
     git::{remote_branch_file_url, remote_file_url},
 };
 
@@ -26,13 +26,47 @@ struct RankedResult {
     proximity: (usize, usize),
 }
 
+/// Everything a search needs besides the query itself.
+#[derive(Debug, Clone, Copy)]
+pub struct SearchOptions<'a> {
+    /// Directory results are ranked relative to.
+    pub from: &'a Path,
+    pub limit: usize,
+    /// Regex over repository-relative paths.
+    pub path_filter: Option<&'a str>,
+    pub symbol_kind: Option<&'a str>,
+    pub annotate_git_state: bool,
+    pub collapse: Collapse,
+}
+
+impl<'a> SearchOptions<'a> {
+    pub fn new(from: &'a Path, limit: usize) -> Self {
+        Self {
+            from,
+            limit,
+            path_filter: None,
+            symbol_kind: None,
+            annotate_git_state: false,
+            collapse: Collapse::None,
+        }
+    }
+}
+
+/// Every match on its own row, for callers that do not need collapsing.
 pub fn search(
     connection: &Connection,
     query: &str,
     from: &Path,
     limit: usize,
 ) -> Result<Vec<SearchResult>> {
-    search_filtered(connection, query, from, limit, None, None, None)
+    Ok(collapsed_search(
+        connection,
+        &[query.to_owned()],
+        SearchOptions::new(from, limit),
+    )?
+    .into_iter()
+    .map(|result| result.representative)
+    .collect())
 }
 
 pub fn distinct_symbol_kinds(connection: &Connection) -> Result<Vec<String>> {
@@ -43,339 +77,104 @@ pub fn distinct_symbol_kinds(connection: &Connection) -> Result<Vec<String>> {
     Ok(kinds)
 }
 
-pub fn search_filtered(
-    connection: &Connection,
-    query: &str,
-    from: &Path,
-    limit: usize,
-    path_filter: Option<&str>,
-    symbol_kind: Option<&str>,
-    stale_after: Option<Duration>,
-) -> Result<Vec<SearchResult>> {
-    search_filtered_terms(
-        connection,
-        &[query.to_owned()],
-        from,
-        limit,
-        path_filter,
-        symbol_kind,
-        stale_after,
-    )
+/// How many symbols one printed row stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Collapse {
+    /// Every match on its own row.
+    None,
+    /// One row per declaring type, so members fold into the type they live in.
+    Type,
+    /// One row per repository, so a query surveys the whole tree.
+    Repository,
 }
 
-pub fn search_filtered_terms(
+/// Ranks every match, then folds the ranked list to the requested granularity.
+pub fn collapsed_search(
     connection: &Connection,
     query_parts: &[String],
-    from: &Path,
-    limit: usize,
-    path_filter: Option<&str>,
-    symbol_kind: Option<&str>,
-    stale_after: Option<Duration>,
-) -> Result<Vec<SearchResult>> {
+    options: SearchOptions<'_>,
+) -> Result<Vec<CollapsedResult>> {
     let terms = query_terms(query_parts)?;
-    if limit == 0 {
+    if options.limit == 0 {
         return Ok(Vec::new());
     }
-    let ranked = ranked_filtered_terms(
-        connection,
-        &terms,
-        from,
-        path_filter,
-        symbol_kind,
-        stale_after,
-    )?;
-    let mut namespaces = HashSet::new();
-    let mut results = Vec::with_capacity(limit.min(ranked.len()));
-    for item in ranked {
-        if item.result.kind == "namespace"
-            && !namespaces.insert((item.repository_root, item.result.name.to_ascii_lowercase()))
-        {
-            continue;
-        }
-        results.push(item.result);
-        if results.len() == limit {
-            break;
-        }
-    }
-    Ok(results)
-}
-
-/// Keeps the best-ranked match per repository so one query surfaces several repositories.
-pub fn repository_search_filtered_terms(
-    connection: &Connection,
-    query_parts: &[String],
-    from: &Path,
-    limit: usize,
-    path_filter: Option<&str>,
-    symbol_kind: Option<&str>,
-    stale_after: Option<Duration>,
-) -> Result<Vec<RoughSearchResult>> {
-    let terms = query_terms(query_parts)?;
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let ranked = ranked_filtered_terms(
-        connection,
-        &terms,
-        from,
-        path_filter,
-        symbol_kind,
-        stale_after,
-    )?;
-    let mut repositories: HashMap<String, usize> = HashMap::new();
-    let mut results: Vec<RoughSearchResult> = Vec::new();
-    for item in ranked {
-        // Count matches beyond the limit too, so the reported size hint stays complete.
-        if let Some(index) = repositories.get(&item.repository_root).copied() {
-            results[index].match_count += 1;
-            continue;
-        }
-        repositories.insert(item.repository_root, results.len());
-        results.push(RoughSearchResult {
-            representative: item.result,
-            match_count: 1,
-            shared_directory: None,
-        });
-    }
-    results.truncate(limit);
-    Ok(results)
-}
-
-pub fn rough_search_filtered_terms(
-    connection: &Connection,
-    query_parts: &[String],
-    from: &Path,
-    limit: usize,
-    path_filter: Option<&str>,
-    symbol_kind: Option<&str>,
-    stale_after: Option<Duration>,
-) -> Result<Vec<RoughSearchResult>> {
-    let terms = query_terms(query_parts)?;
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let ranked = ranked_filtered_terms(
-        connection,
-        &terms,
-        from,
-        path_filter,
-        symbol_kind,
-        stale_after,
-    )?;
-    let matching_namespaces = ranked
-        .iter()
-        .filter(|item| item.result.kind == "namespace")
-        .map(|item| {
+    let ranked = ranked_filtered_terms(connection, &terms, options)?;
+    // A namespace has no declaring type, so it is keyed apart from a type of the
+    // same qualified name rather than merged with it.
+    type GroupKey = (String, bool, String);
+    let mut namespaces: HashMap<(String, String), usize> = HashMap::new();
+    let mut groups: HashMap<GroupKey, usize> = HashMap::new();
+    let mut results: Vec<CollapsedResult> = Vec::new();
+    for mut item in ranked {
+        // One namespace declared across many files is one concept, not many hits.
+        let namespace_key = (item.result.kind == "namespace").then(|| {
             (
                 item.repository_root.clone(),
                 item.result.name.to_ascii_lowercase(),
             )
-        })
-        .collect::<HashSet<_>>();
-    let enclosing_types = ranked
-        .iter()
-        .filter_map(|item| {
-            enclosing_qualified_name(&item.result)
-                .map(|qualified_name| (item.repository_root.clone(), qualified_name.to_owned()))
-        })
-        .collect::<HashSet<_>>();
-    let mut namespace_groups: HashMap<(String, String), usize> = HashMap::new();
-    let mut type_groups: HashMap<(String, String), usize> = HashMap::new();
-    let mut results: Vec<RoughSearchResult> = Vec::new();
-    for mut item in ranked {
-        let namespace_name = if item.result.kind == "namespace" {
-            Some(item.result.name.as_str())
-        } else {
-            item.result.namespace.as_deref()
-        };
-        let namespace_key =
-            namespace_name.map(|name| (item.repository_root.clone(), name.to_ascii_lowercase()));
-        if let Some(key) = namespace_key
-            && matching_namespaces.contains(&key)
+        });
+        if let Some(key) = &namespace_key
+            && let Some(index) = namespaces.get(key).copied()
         {
-            let directory = item
-                .result
-                .local_path
-                .parent()
-                .unwrap_or(&item.result.local_path)
-                .to_path_buf();
-            if let Some(index) = namespace_groups.get(&key).copied() {
-                let group = &mut results[index];
-                group.match_count += 1;
-                group.shared_directory = Some(common_path(
-                    group.shared_directory.as_deref().unwrap_or(&directory),
-                    &directory,
-                ));
-                if item.result.kind == "namespace" && group.representative.kind != "namespace" {
-                    item.result.match_score = item
-                        .result
-                        .match_score
-                        .max(group.representative.match_score);
-                    group.representative = item.result;
-                }
-            } else {
-                let index = results.len();
-                namespace_groups.insert(key, index);
-                results.push(RoughSearchResult {
+            results[index].match_count += 1;
+            continue;
+        }
+        let index = match collapse_key(&item, options.collapse) {
+            None => {
+                results.push(CollapsedResult {
                     representative: item.result,
                     match_count: 1,
-                    shared_directory: Some(directory),
                 });
+                results.len() - 1
             }
-        } else if let Some(key) = rough_type_key(&item, &enclosing_types) {
-            if let Some(index) = type_groups.get(&key).copied() {
-                let group = &mut results[index];
-                group.match_count += 1;
-                if item.result.qualified_name == key.1 {
-                    item.result.match_score = item
-                        .result
-                        .match_score
-                        .max(group.representative.match_score);
-                    group.representative = item.result;
+            // Counting past --limit keeps one row per group and a complete count.
+            Some(key) => match groups.get(&key).copied() {
+                Some(index) => {
+                    let group = &mut results[index];
+                    group.match_count += 1;
+                    // A group reads better named by its own type than by one of
+                    // its members, whenever that type matched the query too.
+                    if item.result.qualified_name == key.2
+                        && group.representative.qualified_name != key.2
+                    {
+                        item.result.match_score = item
+                            .result
+                            .match_score
+                            .max(group.representative.match_score);
+                        group.representative = item.result;
+                    }
+                    index
                 }
-            } else {
-                let index = results.len();
-                let enclosing_name = key.1.clone();
-                type_groups.insert(key, index);
-                let representative = if item.result.qualified_name == enclosing_name {
-                    item.result
-                } else {
-                    enclosing_representative(
-                        connection,
-                        &item.repository_root,
-                        &enclosing_name,
-                        &item.result.relative_path,
-                        item.result.match_score,
-                        stale_after,
-                    )?
-                    .unwrap_or(item.result)
-                };
-                results.push(RoughSearchResult {
-                    representative,
-                    match_count: 1,
-                    shared_directory: None,
-                });
-            }
-        } else {
-            results.push(RoughSearchResult {
-                representative: item.result,
-                match_count: 1,
-                shared_directory: None,
-            });
+                None => {
+                    groups.insert(key, results.len());
+                    results.push(CollapsedResult {
+                        representative: item.result,
+                        match_count: 1,
+                    });
+                    results.len() - 1
+                }
+            },
+        };
+        if let Some(key) = namespace_key {
+            namespaces.insert(key, index);
         }
     }
-    results.truncate(limit);
+    results.truncate(options.limit);
     Ok(results)
 }
 
-fn enclosing_representative(
-    connection: &Connection,
-    repository_root: &str,
-    qualified_name: &str,
-    preferred_path: &str,
-    match_score: u16,
-    stale_after: Option<Duration>,
-) -> Result<Option<SearchResult>> {
-    let mut statement = connection.prepare(
-        "SELECT s.name, s.qualified_name, s.kind, s.parent, s.namespace,
-                s.start_line, s.end_line,
-                f.path, r.remote, r.revision, r.branch,
-                r.origin_branch, r.current_branch, r.last_fetch_at
-         FROM symbols s
-         JOIN files f ON f.id = s.file_id
-         JOIN repositories r ON r.id = f.repository_id
-         WHERE r.root = ?1 AND s.qualified_name = ?2
-         ORDER BY CASE WHEN f.path = ?3 THEN 0 ELSE 1 END, f.path, s.start_line
-         LIMIT 1",
-    )?;
-    let row = statement
-        .query_row(
-            params![repository_root, qualified_name, preferred_path],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, usize>(5)?,
-                    row.get::<_, usize>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                    row.get::<_, Option<String>>(11)?,
-                    row.get::<_, Option<String>>(12)?,
-                    row.get::<_, Option<u64>>(13)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((
-        name,
-        qualified_name,
-        kind,
-        parent,
-        namespace,
-        start_line,
-        end_line,
-        relative_path,
-        remote,
-        revision,
-        branch,
-        origin_branch,
-        current_branch,
-        last_fetch_at,
-    )) = row
-    else {
-        return Ok(None);
-    };
-    Ok(Some(SearchResult {
-        name,
-        qualified_name,
-        kind,
-        match_score,
-        namespace,
-        parent,
-        local_path: Path::new(repository_root).join(&relative_path),
-        relative_path: relative_path.clone(),
-        start_line,
-        end_line,
-        remote_url: branch
-            .as_deref()
-            .and_then(|branch| remote_branch_file_url(remote.as_deref(), branch, &relative_path)),
-        commit_url: remote_file_url(
-            remote.as_deref(),
-            &revision,
-            &relative_path,
-            start_line,
-            end_line,
-        ),
-        git_state: stale_after.and_then(|stale_after| {
-            stale_git_state(
-                remote.as_deref(),
-                origin_branch.as_deref(),
-                current_branch.as_deref(),
-                last_fetch_at,
-                stale_after,
-            )
-        }),
-    }))
-}
-
-fn rough_type_key(
-    item: &RankedResult,
-    enclosing_types: &HashSet<(String, String)>,
-) -> Option<(String, String)> {
-    let own_key = (
-        item.repository_root.clone(),
-        item.result.qualified_name.clone(),
-    );
-    if enclosing_types.contains(&own_key) {
-        return Some(own_key);
+fn collapse_key(item: &RankedResult, collapse: Collapse) -> Option<(String, bool, String)> {
+    match collapse {
+        Collapse::None => None,
+        Collapse::Repository => Some((item.repository_root.clone(), false, String::new())),
+        Collapse::Type => Some((
+            item.repository_root.clone(),
+            item.result.kind == "namespace",
+            enclosing_qualified_name(&item.result)
+                .unwrap_or(&item.result.qualified_name)
+                .to_owned(),
+        )),
     }
-    enclosing_qualified_name(&item.result)
-        .map(|qualified_name| (item.repository_root.clone(), qualified_name.to_owned()))
 }
 
 fn enclosing_qualified_name(result: &SearchResult) -> Option<&str> {
@@ -389,16 +188,14 @@ fn enclosing_qualified_name(result: &SearchResult) -> Option<&str> {
 fn ranked_filtered_terms(
     connection: &Connection,
     terms: &[String],
-    from: &Path,
-    path_filter: Option<&str>,
-    symbol_kind: Option<&str>,
-    stale_after: Option<Duration>,
+    options: SearchOptions<'_>,
 ) -> Result<Vec<RankedResult>> {
     let canonical_terms = terms
         .iter()
         .map(|term| canonical_name(term))
         .collect::<Vec<_>>();
-    let path_filter = path_filter
+    let path_filter = options
+        .path_filter
         .map(Regex::new)
         .transpose()
         .context("invalid --filter regex")?;
@@ -450,7 +247,7 @@ fn ranked_filtered_terms(
             current_branch,
             last_fetch_at,
         ) = row?;
-        if symbol_kind.is_some_and(|filter| kind != filter) {
+        if options.symbol_kind.is_some_and(|filter| kind != filter) {
             continue;
         }
         if path_filter
@@ -464,20 +261,27 @@ fn ranked_filtered_terms(
         let short_name = canonical_name(&name);
         let qualified = canonical_name(&qualified_name);
         let mut total_similarity = 0_u64;
+        let mut best_term_score = 0_u32;
         for term in &canonical_terms {
             let short_score = canonical_similarity(term, &short_name);
             if short_score == 10_000 {
                 exact_short_terms += 1;
             }
-            let qualified_score = if qualified_name == name {
+            let raw_qualified_score = if qualified_name == name {
                 0
             } else {
-                match canonical_similarity(term, &qualified) {
-                    10_000 => 9_900,
-                    score => score * 95 / 100,
-                }
+                canonical_similarity(term, &qualified)
+            };
+            let qualified_score = match raw_qualified_score {
+                0 => 0,
+                10_000 => 9_900,
+                score => score * 95 / 100,
             };
             let term_score = short_score.max(qualified_score);
+            // The reported tier describes the best single term, before the
+            // qualified-name discount and the multi-term average that ranking
+            // uses - averaging an exact hit with a miss names no real band.
+            best_term_score = best_term_score.max(short_score.max(raw_qualified_score));
             if term_score > 0 {
                 covered_terms += 1;
                 total_similarity += u64::from(term_score);
@@ -489,12 +293,12 @@ fn ranked_filtered_terms(
         let similarity = (total_similarity / terms.len() as u64) as u32;
         let local_path = Path::new(&root).join(&relative_path);
         ranked.push(RankedResult {
-            proximity: proximity(from, &local_path),
+            proximity: proximity(options.from, &local_path),
             result: SearchResult {
                 name,
                 qualified_name,
                 kind,
-                match_score: similarity.min(10_000) as u16,
+                match_score: best_term_score.min(10_000) as u16,
                 namespace,
                 parent,
                 local_path,
@@ -502,7 +306,7 @@ fn ranked_filtered_terms(
                 start_line,
                 end_line,
                 remote_url: branch.as_deref().and_then(|branch| {
-                    remote_branch_file_url(remote.as_deref(), branch, &relative_path)
+                    remote_branch_file_url(remote.as_deref(), branch, &relative_path, start_line)
                 }),
                 commit_url: remote_file_url(
                     remote.as_deref(),
@@ -511,15 +315,17 @@ fn ranked_filtered_terms(
                     start_line,
                     end_line,
                 ),
-                git_state: stale_after.and_then(|stale_after| {
-                    stale_git_state(
-                        remote.as_deref(),
-                        origin_branch.as_deref(),
-                        current_branch.as_deref(),
-                        last_fetch_at,
-                        stale_after,
-                    )
-                }),
+                git_state: options
+                    .annotate_git_state
+                    .then(|| {
+                        git_state(
+                            remote.as_deref(),
+                            origin_branch.as_deref(),
+                            current_branch.as_deref(),
+                            last_fetch_at,
+                        )
+                    })
+                    .flatten(),
             },
             repository_root: root,
             full_coverage: covered_terms == terms.len(),
@@ -533,45 +339,44 @@ fn ranked_filtered_terms(
     Ok(ranked)
 }
 
-fn common_path(left: &Path, right: &Path) -> PathBuf {
-    left.components()
-        .zip(right.components())
-        .take_while(|(left, right)| left == right)
-        .map(|(component, _)| component.as_os_str())
-        .collect()
-}
-
-fn stale_git_state(
+/// How far the local checkout can be trusted: fetch age in whole days, plus the
+/// branch when it is not the repository's default. Repositories without an
+/// origin remote have nothing to be measured against and get no marker.
+fn git_state(
     remote: Option<&str>,
     origin_branch: Option<&str>,
     current_branch: Option<&str>,
     last_fetch_at: Option<u64>,
-    stale_after: Duration,
 ) -> Option<String> {
-    if remote.is_none() || stale_after.is_zero() {
-        return None;
-    }
-    let mut reasons = Vec::new();
-    match (current_branch, origin_branch) {
-        (Some(current), Some(origin)) if current == origin => {}
-        (_, Some(_)) => reasons.push("not-origin-branch".to_owned()),
-        (_, None) => reasons.push("origin-branch-unknown".to_owned()),
-    }
-
-    match last_fetch_at {
+    remote?;
+    let fetch = match last_fetch_at {
         Some(fetched_at) => {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(fetched_at, |duration| duration.as_secs());
-            let age_seconds = now.saturating_sub(fetched_at);
-            if age_seconds > stale_after.as_secs() {
-                reasons.push(format!("fetch>{}d", age_seconds / (24 * 60 * 60)));
-            }
+            format!("fetch:{}d", now.saturating_sub(fetched_at) / (24 * 60 * 60))
         }
-        None => reasons.push("fetch-unknown".to_owned()),
-    }
+        None => "fetch:?".to_owned(),
+    };
+    let branch = match (current_branch, origin_branch) {
+        (Some(current), Some(origin)) if current == origin => String::new(),
+        (Some(current), Some(_)) => format!("  branch:{current}"),
+        _ => "  branch:?".to_owned(),
+    };
+    Some(format!("{fetch}{branch}"))
+}
 
-    (!reasons.is_empty()).then(|| format!("local-state({})", reasons.join(",")))
+/// Word for the score band `canonical_similarity` produced, so callers never
+/// have to know the scale.
+pub fn match_tier(score: u16) -> &'static str {
+    match score {
+        10_000 => "exact",
+        9_000..=9_999 => "prefix",
+        7_000..=8_999 => "substring",
+        6_000..=6_999 => "abbrev",
+        5_000..=5_999 => "typo",
+        _ => "weak",
+    }
 }
 
 fn compare_ranked(left: &RankedResult, right: &RankedResult) -> Ordering {
@@ -972,14 +777,12 @@ mod tests {
     fn zero_limit_returns_no_results() {
         let connection = Connection::open_in_memory().unwrap();
         assert!(
-            search_filtered_terms(
+            collapsed_search(
                 &connection,
                 &["Anything".to_owned()],
-                Path::new("/code"),
-                0,
-                None,
-                None,
-                None,
+                SearchOptions {
+                    ..SearchOptions::new(Path::new("/code"), 0)
+                },
             )
             .unwrap()
             .is_empty()
@@ -989,52 +792,49 @@ mod tests {
     #[test]
     fn multi_term_ranking_is_order_independent_and_keeps_partial_matches() {
         let connection = search_fixture();
-        let forward = search_filtered_terms(
+        let forward = collapsed_search(
             &connection,
             &["Acme".to_owned(), "Widget".to_owned()],
-            Path::new("/work"),
-            10,
-            None,
-            Some("class"),
-            None,
+            SearchOptions {
+                symbol_kind: Some("class"),
+                ..SearchOptions::new(Path::new("/work"), 10)
+            },
         )
         .unwrap();
-        let reverse = search_filtered_terms(
+        let reverse = collapsed_search(
             &connection,
             &["Widget".to_owned(), "Acme".to_owned()],
-            Path::new("/work"),
-            10,
-            None,
-            Some("class"),
-            None,
+            SearchOptions {
+                symbol_kind: Some("class"),
+                ..SearchOptions::new(Path::new("/work"), 10)
+            },
         )
         .unwrap();
 
         let forward_names = forward
             .iter()
-            .map(|result| result.name.as_str())
+            .map(|result| result.representative.name.as_str())
             .collect::<Vec<_>>();
         let reverse_names = reverse
             .iter()
-            .map(|result| result.name.as_str())
+            .map(|result| result.representative.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(forward_names, reverse_names);
         assert_eq!(forward_names[0], "Widget");
         assert!(forward_names.contains(&"AcmeOnly"));
         assert_eq!(forward_names.last(), Some(&"AcmeOnly"));
 
-        let short_exact = search_filtered_terms(
+        let short_exact = collapsed_search(
             &connection,
             &["Widget".to_owned()],
-            Path::new("/work"),
-            10,
-            None,
-            Some("class"),
-            None,
+            SearchOptions {
+                symbol_kind: Some("class"),
+                ..SearchOptions::new(Path::new("/work"), 10)
+            },
         )
         .unwrap();
-        assert_eq!(short_exact[0].name, "Widget");
-        assert_eq!(short_exact[1].name, "Tools");
+        assert_eq!(short_exact[0].representative.name, "Widget");
+        assert_eq!(short_exact[1].representative.name, "Tools");
     }
 
     fn search_fixture() -> Connection {
@@ -1101,40 +901,89 @@ mod tests {
     }
 
     #[test]
-    fn git_state_is_only_returned_when_stale() {
+    fn git_state_reports_fetch_age_and_off_default_branches() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
+        let remote = Some("git@example.com:acme/shop.git");
+
         assert_eq!(
-            stale_git_state(
-                Some("git@example.com:acme/shop.git"),
+            git_state(
+                remote,
                 Some("main"),
                 Some("main"),
-                Some(now - 2 * 24 * 60 * 60),
-                Duration::from_secs(3 * 24 * 60 * 60),
+                Some(now - 2 * 24 * 60 * 60)
             ),
-            None
+            Some("fetch:2d".to_owned())
         );
         assert_eq!(
-            stale_git_state(
-                Some("git@example.com:acme/shop.git"),
+            git_state(
+                remote,
                 Some("main"),
                 Some("feature/payments"),
-                Some(now - 5 * 24 * 60 * 60),
-                Duration::from_secs(3 * 24 * 60 * 60),
+                Some(now - 5 * 24 * 60 * 60)
             ),
-            Some("local-state(not-origin-branch,fetch>5d)".to_owned())
+            Some("fetch:5d  branch:feature/payments".to_owned())
         );
         assert_eq!(
-            stale_git_state(
-                Some("git@example.com:acme/shop.git"),
-                Some("main"),
-                Some("feature/payments"),
-                None,
-                Duration::ZERO,
-            ),
-            None
+            git_state(remote, None, Some("main"), None),
+            Some("fetch:?  branch:?".to_owned())
         );
+        // A repository without a remote has no origin to be measured against.
+        assert_eq!(git_state(None, Some("main"), Some("main"), Some(now)), None);
+    }
+
+    #[test]
+    fn match_tiers_name_the_score_bands() {
+        assert_eq!(
+            match_tier(name_similarity("DatabaseContext", "DatabaseContext") as u16),
+            "exact"
+        );
+        assert_eq!(
+            match_tier(name_similarity("Database", "DatabaseContext") as u16),
+            "prefix"
+        );
+        assert_eq!(
+            match_tier(name_similarity("Context", "DatabaseContext") as u16),
+            "substring"
+        );
+        assert_eq!(
+            match_tier(name_similarity("DbCtx", "DatabaseContext") as u16),
+            "abbrev"
+        );
+        assert_eq!(
+            match_tier(name_similarity("DatabsaeContext", "DatabaseContext") as u16),
+            "typo"
+        );
+    }
+
+    #[test]
+    fn tiers_survive_the_qualified_discount_and_multi_term_averaging() {
+        let connection = search_fixture();
+
+        // An exact qualified-name hit is scored 9900 for ranking; the tier must
+        // still call it exact rather than demoting it a band.
+        let qualified = collapsed_search(
+            &connection,
+            &["Acme.Tools.Widget".to_owned()],
+            SearchOptions {
+                ..SearchOptions::new(Path::new("/work"), 10)
+            },
+        )
+        .unwrap();
+        assert_eq!(match_tier(qualified[0].representative.match_score), "exact");
+
+        // One exact term averaged with a term nothing covers must not read as a typo.
+        let partial = collapsed_search(
+            &connection,
+            &["Widget".to_owned(), "Zzzqqqxyz".to_owned()],
+            SearchOptions {
+                ..SearchOptions::new(Path::new("/work"), 10)
+            },
+        )
+        .unwrap();
+        assert_eq!(partial[0].representative.name, "Widget");
+        assert_eq!(match_tier(partial[0].representative.match_score), "exact");
     }
 }

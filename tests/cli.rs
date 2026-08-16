@@ -19,17 +19,20 @@ fn help_documents_required_environment_and_path_filters() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("CFIND_ROOT=/path/to/code"), "{stdout}");
     assert!(stdout.contains("Required repository directory"), "{stdout}");
-    assert!(stdout.contains(r"-f '\.cs$'"), "{stdout}");
+    assert!(stdout.contains(r"-f '^src/.*\.rs$'"), "{stdout}");
     assert!(stdout.contains("Path regex"), "{stdout}");
     assert!(stdout.contains(r"'\.(cs|rs)$'"), "{stdout}");
-    assert!(stdout.contains("[default: 10]"), "{stdout}");
+    assert!(stdout.contains("[default: 7]"), "{stdout}");
     assert!(stdout.contains("--quiet"), "{stdout}");
     assert!(
         stdout.contains("omit TYPE to list indexed kinds"),
         "{stdout}"
     );
     assert!(!stdout.contains("--verbose"), "{stdout}");
-    assert!(stdout.contains("cfind --type"), "{stdout}");
+    assert!(
+        stdout.contains("No lookaround or backreferences"),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("CFIND_LANGUAGES=rust,javascript,typescript,csharp"),
         "{stdout}"
@@ -39,15 +42,18 @@ fn help_documents_required_environment_and_path_filters() {
         "{stdout}"
     );
     assert!(stdout.contains("--commit-url"), "{stdout}");
-    assert!(stdout.contains("--rough"), "{stdout}");
+    assert!(stdout.contains("--collapse"), "{stdout}");
     assert!(
-        stdout.contains("List every match instead of the best one per repository"),
+        stdout.contains("one row per repository, per declaring type, or per match"),
         "{stdout}"
     );
     assert!(stdout.contains("CFIND_STALE_AFTER_HOURS=6"), "{stdout}");
     assert!(stdout.contains("0 disables"), "{stdout}");
     assert!(stdout.contains("rebuild 3x"), "{stdout}");
-    assert!(stdout.contains("fetch stale 12x"), "{stdout}");
+    assert!(
+        stdout.contains("Print each symbol's fully qualified name"),
+        "{stdout}"
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_cfind"))
         .arg("--verbose")
@@ -197,7 +203,10 @@ fn search_creates_a_missing_index_and_then_returns_results() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stdout.contains("Indexed "), "{stdout}");
     assert!(stdout.contains("AutoIndexedSymbol"), "{stdout}");
-    assert!(stdout.contains("10000"), "{stdout}");
+    assert!(
+        stdout.contains("exact  struct  AutoIndexedSymbol"),
+        "{stdout}"
+    );
     assert!(stderr.contains("No index found."), "{stderr}");
     assert!(stderr.contains("Creating SQLite index at"), "{stderr}");
     assert!(stderr.contains("Indexing"), "{stderr}");
@@ -369,7 +378,7 @@ fn index_format_change_rebuilds_before_searching() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "9");
+    assert_eq!(version, "12");
 }
 
 #[test]
@@ -480,12 +489,13 @@ fn branch_urls_are_default_and_commit_urls_are_opt_in() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("RemoteSymbol"), "{stdout}");
-    assert!(!stdout.contains("local-state("), "{stdout}");
+    // Freshly created origin refs, checked out on the origin default branch.
+    assert!(stdout.contains("fetch:0d"), "{stdout}");
+    assert!(!stdout.contains("branch:"), "{stdout}");
     assert!(
-        stdout.contains("https://github.com/acme/example/blob/main/src/lib.rs"),
+        stdout.contains("https://github.com/acme/example/blob/main/src/lib.rs#L1"),
         "{stdout}"
     );
-    assert!(!stdout.contains("#L"), "{stdout}");
 
     let output = cfind_command(&workspace, &index_path)
         .args(["RemoteSymbol", "--commit-url"])
@@ -508,7 +518,9 @@ fn branch_urls_are_default_and_commit_urls_are_opt_in() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("RemoteSymbol"), "{stdout}");
     assert!(!stdout.contains("https://"), "{stdout}");
-    assert!(!stdout.contains("local-state("), "{stdout}");
+    // CFIND_STALE_AFTER_HOURS=0 switches Git state annotation off entirely.
+    assert!(!stdout.contains("fetch:"), "{stdout}");
+    assert!(!stdout.contains("branch:"), "{stdout}");
 }
 
 #[test]
@@ -542,10 +554,8 @@ fn search_filters_results_by_path_regex() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("src/Shared.cs"), "{stdout}");
     assert!(!stdout.contains("src/shared.rs"), "{stdout}");
-    assert!(
-        stdout.contains("\n  Acme.Data.SharedSymbol\n\n"),
-        "{stdout}"
-    );
+    // The qualified name is opt-in; the path already implies it.
+    assert!(!stdout.contains("Acme.Data.SharedSymbol"), "{stdout}");
 
     for name in ["SharedRecord", "SharedValue"] {
         let output = cfind_command(&workspace, &index_path)
@@ -556,11 +566,21 @@ fn search_filters_results_by_path_regex() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains(&format!("class  {name}")), "{stdout}");
     }
-    let path = stdout.find("src/Shared.cs:2").unwrap();
-    let url = stdout.find("https://github.com/acme/shared/").unwrap();
-    let qualified_name = stdout.rfind("\n  Acme.Data.SharedSymbol").unwrap();
-    assert!(path < url && url < qualified_name, "{stdout}");
-    assert!(stdout.ends_with("\n\n"), "{stdout}");
+    let output = cfind_command(&workspace, &index_path)
+        .args(["SharedSymbol", "--filter", r"\.cs$", "--qualified"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let qualified_stdout = String::from_utf8_lossy(&output.stdout);
+    let path = qualified_stdout.find("src/Shared.cs:2").unwrap();
+    let url = qualified_stdout
+        .find("https://github.com/acme/shared/")
+        .unwrap();
+    let qualified_name = qualified_stdout
+        .rfind("\n  Acme.Data.SharedSymbol")
+        .unwrap();
+    assert!(path < url && url < qualified_name, "{qualified_stdout}");
+    assert!(qualified_stdout.ends_with("\n\n"), "{qualified_stdout}");
 
     let output = cfind_command(&workspace, &index_path)
         .arg("--type")
@@ -573,7 +593,7 @@ fn search_filters_results_by_path_regex() {
     );
 
     let output = cfind_command(&workspace, &index_path)
-        .args(["SharedSymbol", "--type", "class"])
+        .args(["SharedSymbol", "--type", "class", "--qualified"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -595,7 +615,7 @@ fn search_filters_results_by_path_regex() {
     assert!(!stdout.contains("\n  SharedSymbol\n"), "{stdout}");
 
     let output = cfind_command(&workspace, &index_path)
-        .args(["SharedSymbol", "--type", "class", "--quiet"])
+        .args(["SharedSymbol", "--type", "class", "--quiet", "--qualified"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -723,7 +743,7 @@ fn qualified_multi_term_queries_rank_the_leaf_and_accept_options_anywhere() {
     let unquoted = String::from_utf8_lossy(&output.stdout);
     assert!(unquoted.contains("class  PaymentProcessor"), "{unquoted}");
     assert!(
-        unquoted.contains("Acme.Tools.Container.PaymentProcessor"),
+        !unquoted.contains("Acme.Tools.Container.PaymentProcessor"),
         "{unquoted}"
     );
 
@@ -798,7 +818,7 @@ fn type_declarations_win_ties_against_their_members() {
     run_git(&workspace, &["add", "src/Ordering.cs"]);
 
     let output = cfind_command(&workspace, &index_path)
-        .args(["Ordering", "--all", "--limit", "2", "--quiet"])
+        .args(["Ordering", "--collapse", "none", "--limit", "2", "--quiet"])
         .output()
         .unwrap();
     assert!(
@@ -827,7 +847,15 @@ fn short_numeric_terms_still_contribute_to_multi_term_coverage() {
     run_git(&workspace, &["add", "src/Migrations.cs"]);
 
     let output = cfind_command(&workspace, &index_path)
-        .args(["Database", "16", "--all", "--limit", "3", "--quiet"])
+        .args([
+            "Database",
+            "16",
+            "--collapse",
+            "none",
+            "--limit",
+            "3",
+            "--quiet",
+        ])
         .output()
         .unwrap();
     assert!(
@@ -901,28 +929,36 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
     run_git(&second, &["add", "d.cs"]);
 
     let output = cfind_command(&workspace, &index_path)
-        .args(["Acme", "--all", "--type", "namespace", "--limit", "10"])
+        .args([
+            "Acme",
+            "--collapse",
+            "none",
+            "--type",
+            "namespace",
+            "--limit",
+            "10",
+        ])
         .output()
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
-        stdout.matches("namespace  Acme.Shared  ").count(),
+        stdout.matches("namespace  Acme.Shared\n").count(),
         2,
         "{stdout}"
     );
     assert_eq!(
-        stdout.matches("namespace  Acme.SharedOther  ").count(),
+        stdout.matches("namespace  Acme.SharedOther\n").count(),
         1,
         "{stdout}"
     );
     assert_eq!(
-        stdout.matches("namespace  AcmeShared  ").count(),
+        stdout.matches("namespace  AcmeShared\n").count(),
         1,
         "{stdout}"
     );
     assert_eq!(
-        stdout.matches("namespace  Acme.Location  ").count(),
+        stdout.matches("namespace  Acme.Location\n").count(),
         1,
         "{stdout}"
     );
@@ -933,7 +969,8 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
     let output = cfind_command(&workspace, &index_path)
         .args([
             "Acme.Shared",
-            "--all",
+            "--collapse",
+            "none",
             "--type",
             "namespace",
             "--limit",
@@ -950,7 +987,8 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
     let output = cfind_command(&workspace, &index_path)
         .args([
             "Acme.Location",
-            "--all",
+            "--collapse",
+            "none",
             "--type",
             "namespace",
             "--limit",
@@ -968,7 +1006,7 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
     );
 
     let output = cfind_command(&workspace, &index_path)
-        .args(["Run", "--all", "--type", "method"])
+        .args(["Run", "--collapse", "none", "--type", "method"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -980,7 +1018,7 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
     );
 
     let output = cfind_command(&workspace, &index_path)
-        .args(["Duplicate", "--all", "--type", "constructor"])
+        .args(["Duplicate", "--collapse", "none", "--type", "constructor"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -993,7 +1031,7 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
 }
 
 #[test]
-fn searches_return_one_result_per_repository_until_all_is_requested() {
+fn repository_collapse_returns_one_result_per_repository() {
     let temporary = TempDir::new().unwrap();
     let workspace = temporary.path().join("workspace");
     let index_path = temporary.path().join("indexes/workspace.sqlite");
@@ -1037,10 +1075,10 @@ fn searches_return_one_result_per_repository_until_all_is_requested() {
             "{stdout}"
         );
     }
-    assert!(stdout.contains("class  PaymentService  "), "{stdout}");
+    assert!(stdout.contains("class  PaymentService"), "{stdout}");
     assert!(!stdout.contains("constructor  "), "{stdout}");
-    assert!(stdout.contains("matches=3"), "{stdout}");
-    assert_eq!(stdout.matches("matches=1").count(), 2, "{stdout}");
+    // Match counts belong to --collapse type, where folding is the point.
+    assert!(!stdout.contains("matches="), "{stdout}");
 
     let limited = cfind_command(&workspace, &index_path)
         .args(["Payment", "--limit", "2", "--quiet"])
@@ -1049,13 +1087,13 @@ fn searches_return_one_result_per_repository_until_all_is_requested() {
     assert!(limited.status.success());
     let limited_stdout = String::from_utf8_lossy(&limited.stdout);
     assert_eq!(
-        limited_stdout.matches("matches=").count(),
+        limited_stdout.matches("/Payments.cs:").count(),
         2,
         "{limited_stdout}"
     );
 
     let detailed = cfind_command(&workspace, &index_path)
-        .args(["Payment", "--all", "--limit", "10", "--quiet"])
+        .args(["Payment", "--collapse", "none", "--limit", "10", "--quiet"])
         .output()
         .unwrap();
     assert!(detailed.status.success());
@@ -1076,20 +1114,21 @@ fn searches_return_one_result_per_repository_until_all_is_requested() {
     );
     assert!(!detailed_stdout.contains("matches="), "{detailed_stdout}");
 
-    let conflict = cfind_command(&workspace, &index_path)
-        .args(["Payment", "--all", "--rough"])
+    let invalid = cfind_command(&workspace, &index_path)
+        .args(["Payment", "--collapse", "bogus"])
         .output()
         .unwrap();
-    assert_eq!(conflict.status.code(), Some(2));
+    assert_eq!(invalid.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&invalid.stderr);
+    assert!(stderr.contains("invalid value 'bogus'"), "{stderr}");
     assert!(
-        String::from_utf8_lossy(&conflict.stderr).contains("cannot be used with"),
-        "{}",
-        String::from_utf8_lossy(&conflict.stderr)
+        stderr.contains("[possible values: none, type, repo]"),
+        "{stderr}"
     );
 }
 
 #[test]
-fn rough_search_collapses_namespace_matches_to_their_shared_directory() {
+fn type_collapse_keeps_namespaces_and_types_as_separate_rows() {
     let temporary = TempDir::new().unwrap();
     let workspace = temporary.path().join("workspace");
     let source_directory = workspace.join("src/services");
@@ -1112,7 +1151,14 @@ fn rough_search_collapses_namespace_matches_to_their_shared_directory() {
     );
 
     let output = cfind_command(&workspace, &index_path)
-        .args(["Acme.Services", "--rough", "--limit", "10", "--quiet"])
+        .args([
+            "Acme.Services",
+            "--collapse",
+            "type",
+            "--limit",
+            "10",
+            "--quiet",
+        ])
         .output()
         .unwrap();
     assert!(
@@ -1121,31 +1167,50 @@ fn rough_search_collapses_namespace_matches_to_their_shared_directory() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    // A namespace is one row of its own; members fold into their declaring type,
+    // not into the namespace.
     assert_eq!(
-        stdout.matches("namespace  Acme.Services  ").count(),
+        stdout.matches("namespace  Acme.Services").count(),
         1,
         "{stdout}"
     );
-    assert!(stdout.contains("matches=7"), "{stdout}");
-    assert!(
-        stdout.contains(&source_directory.display().to_string()),
+    assert_eq!(
+        stdout.matches("class  PaymentService  matches=3").count(),
+        1,
         "{stdout}"
     );
-    assert!(!stdout.contains("Payments.cs"), "{stdout}");
-    assert!(!stdout.contains("Refunds.cs"), "{stdout}");
+    assert_eq!(
+        stdout.matches("class  RefundService  matches=2").count(),
+        1,
+        "{stdout}"
+    );
+    assert!(stdout.contains("Payments.cs"), "{stdout}");
+    assert!(stdout.contains("Refunds.cs"), "{stdout}");
 
     let output = cfind_command(&workspace, &index_path)
-        .args(["Acme.Services", "Payment", "--rough", "--quiet"])
+        .args(["Acme.Services", "Payment", "--collapse", "type", "--quiet"])
         .output()
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.starts_with("namespace  Acme.Services  "), "{stdout}");
-    assert!(stdout.contains("matches=7"), "{stdout}");
+    // Type collapse never folds a type into the namespace above it, so the
+    // namespace stands alone and each type keeps its own row.
+    assert_eq!(
+        stdout
+            .matches("namespace  Acme.Services  matches=2")
+            .count(),
+        1,
+        "{stdout}"
+    );
+    assert_eq!(
+        stdout.matches("class  PaymentService  matches=3").count(),
+        1,
+        "{stdout}"
+    );
 }
 
 #[test]
-fn rough_search_collapses_types_and_members_before_applying_the_limit() {
+fn type_collapse_folds_members_into_types_before_applying_the_limit() {
     let temporary = TempDir::new().unwrap();
     let workspace = temporary.path().join("workspace");
     let source_path = workspace.join("src/Payments.cs");
@@ -1160,7 +1225,7 @@ fn rough_search_collapses_types_and_members_before_applying_the_limit() {
     run_git(&workspace, &["add", "src/Payments.cs"]);
 
     let detailed = cfind_command(&workspace, &index_path)
-        .args(["Payment", "--all", "--limit", "10", "--quiet"])
+        .args(["Payment", "--collapse", "none", "--limit", "10", "--quiet"])
         .output()
         .unwrap();
     assert!(detailed.status.success());
@@ -1170,7 +1235,7 @@ fn rough_search_collapses_types_and_members_before_applying_the_limit() {
     assert!(!detailed_stdout.contains("matches="));
 
     let output = cfind_command(&workspace, &index_path)
-        .args(["Payment", "--rough", "--limit", "2", "--quiet"])
+        .args(["Payment", "--collapse", "type", "--limit", "2", "--quiet"])
         .output()
         .unwrap();
     assert!(
@@ -1180,12 +1245,12 @@ fn rough_search_collapses_types_and_members_before_applying_the_limit() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
-        stdout.matches("class  PaymentService  ").count(),
+        stdout.matches("class  PaymentService  matches=").count(),
         1,
         "{stdout}"
     );
     assert_eq!(
-        stdout.matches("class  PaymentGateway  ").count(),
+        stdout.matches("class  PaymentGateway  matches=").count(),
         1,
         "{stdout}"
     );
@@ -1204,7 +1269,7 @@ fn rough_search_collapses_types_and_members_before_applying_the_limit() {
 }
 
 #[test]
-fn rough_search_uses_the_enclosing_type_when_only_members_match() {
+fn type_collapse_names_a_group_by_its_best_member_when_the_type_does_not_match() {
     let temporary = TempDir::new().unwrap();
     let workspace = temporary.path().join("workspace");
     let source_path = workspace.join("src/Handlers.ts");
@@ -1219,7 +1284,7 @@ fn rough_search_uses_the_enclosing_type_when_only_members_match() {
     run_git(&workspace, &["add", "src/Handlers.ts"]);
 
     let output = cfind_command(&workspace, &index_path)
-        .args(["get", "--rough", "--quiet"])
+        .args(["get", "--collapse", "type", "--quiet"])
         .output()
         .unwrap();
     assert!(
@@ -1228,13 +1293,18 @@ fn rough_search_uses_the_enclosing_type_when_only_members_match() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("class  RequestHandler  "), "{stdout}");
-    assert!(stdout.contains("matches=2"), "{stdout}");
+    // The type itself does not match "get", so its best member names the group
+    // and the header still says which type the members live in.
     assert!(
-        stdout.contains(&format!("{}:1", source_path.display())),
+        stdout.contains("method  getUser in RequestHandler"),
         "{stdout}"
     );
-    assert!(!stdout.contains("method  get"), "{stdout}");
+    assert!(stdout.contains("matches=2"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("{}:2", source_path.display())),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("getOrder"), "{stdout}");
 }
 
 fn cfind_command(workspace: &Path, index_path: &Path) -> Command {
