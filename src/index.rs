@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::{
     Symbol,
     config::{Config, SupportedLanguage},
-    git::{Repository, discover_repositories, tracked_files},
+    git::{Repository, TrackedFile, discover_repositories, tracked_files},
     language::parse_file,
 };
 
@@ -24,7 +24,7 @@ pub struct IndexStats {
     pub elapsed_ms: u128,
 }
 
-const INDEX_VERSION: u64 = 9;
+const INDEX_VERSION: u64 = 12;
 
 struct ParsedFile {
     path: String,
@@ -79,9 +79,7 @@ fn create_database(path: &Path) -> Result<Connection> {
              id INTEGER PRIMARY KEY,
              file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
              name TEXT NOT NULL,
-             normalized_name TEXT NOT NULL,
              qualified_name TEXT NOT NULL,
-             normalized_qualified_name TEXT NOT NULL,
              kind TEXT NOT NULL,
              namespace TEXT,
              start_line INTEGER NOT NULL,
@@ -90,10 +88,6 @@ fn create_database(path: &Path) -> Result<Connection> {
              end_column INTEGER NOT NULL,
              parent TEXT
          );
-         CREATE INDEX IF NOT EXISTS symbols_normalized_name ON symbols(normalized_name);
-         CREATE INDEX IF NOT EXISTS symbols_normalized_qualified_name
-             ON symbols(normalized_qualified_name);
-         CREATE INDEX IF NOT EXISTS symbols_file_id ON symbols(file_id);
          CREATE TABLE IF NOT EXISTS index_metadata (
              key TEXT PRIMARY KEY,
              value TEXT NOT NULL
@@ -119,8 +113,9 @@ pub fn rebuild(config: &Config) -> Result<IndexStats> {
     };
 
     let build_result = (|| {
-        for repository in &repositories {
-            index_repository(&mut connection, repository, config, &mut stats).with_context(
+        let tracked = collect_tracked_files(&repositories, config)?;
+        for (repository, tracked) in repositories.iter().zip(&tracked) {
+            index_repository(&mut connection, repository, tracked, &mut stats).with_context(
                 || format!("could not index repository {}", repository.root.display()),
             )?;
         }
@@ -259,22 +254,35 @@ fn configured_languages(config: &Config) -> String {
     languages.join(",")
 }
 
+/// Listing a repository's files is subprocess-bound, so collect every list up
+/// front in parallel rather than once per sequential database write.
+fn collect_tracked_files(
+    repositories: &[Repository],
+    config: &Config,
+) -> Result<Vec<Vec<(TrackedFile, SupportedLanguage)>>> {
+    repositories
+        .par_iter()
+        .map(|repository| {
+            Ok(tracked_files(repository)?
+                .into_iter()
+                .filter_map(|file| {
+                    let language = SupportedLanguage::from_path(Path::new(&file.path))?;
+                    config
+                        .languages
+                        .contains(&language)
+                        .then_some((file, language))
+                })
+                .collect())
+        })
+        .collect()
+}
+
 fn index_repository(
     connection: &mut Connection,
     repository: &Repository,
-    config: &Config,
+    tracked: &[(TrackedFile, SupportedLanguage)],
     stats: &mut IndexStats,
 ) -> Result<()> {
-    let tracked = tracked_files(repository)?
-        .into_iter()
-        .filter_map(|file| {
-            let language = SupportedLanguage::from_path(Path::new(&file.path))?;
-            config
-                .languages
-                .contains(&language)
-                .then_some((file, language))
-        })
-        .collect::<Vec<_>>();
     stats.tracked_source_files += tracked.len();
     stats.parsed_files += tracked.len();
 
@@ -326,18 +334,15 @@ fn index_repository(
         )?;
         let mut insert = transaction.prepare_cached(
             "INSERT INTO symbols(
-                file_id, name, normalized_name, qualified_name,
-                normalized_qualified_name, kind, namespace, start_line,
+                file_id, name, qualified_name, kind, namespace, start_line,
                 start_column, end_line, end_column, parent
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )?;
         for symbol in file.symbols {
             insert.execute(params![
                 file_id,
                 symbol.name,
-                symbol.name.to_ascii_lowercase(),
                 symbol.qualified_name,
-                symbol.qualified_name.to_ascii_lowercase(),
                 symbol.kind,
                 symbol.namespace,
                 symbol.start_line,
@@ -502,7 +507,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "9");
+        assert_eq!(version, "12");
         let columns = connection
             .prepare("PRAGMA table_info(symbols)")
             .unwrap()
@@ -511,10 +516,11 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert!(columns.iter().any(|column| column == "qualified_name"));
+        // Search scans and scores in Rust, so lowercase mirror columns are dead weight.
         assert!(
-            columns
+            !columns
                 .iter()
-                .any(|column| column == "normalized_qualified_name")
+                .any(|column| column.starts_with("normalized"))
         );
         connection
             .execute(

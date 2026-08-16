@@ -2,11 +2,12 @@ use std::{env, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use cfind::{
+    CollapsedResult, SearchResult,
     config::Config,
     index::{IndexState, index_state, open_database, rebuild},
     search::{
-        canonical_search_origin, distinct_symbol_kinds, query_terms, rough_search_filtered_terms,
-        search_filtered_terms,
+        Collapse, SearchOptions, canonical_search_origin, collapsed_search, distinct_symbol_kinds,
+        match_tier, query_terms,
     },
 };
 use clap::Parser;
@@ -15,7 +16,7 @@ use clap::Parser;
 #[command(
     version,
     about = "Local code symbol search",
-    after_help = "Examples:\n  cfind DatabaseContext\n  cfind Database --rough\n  cfind GzipDecompress -f '\\.cs$'\n  cfind --type\n  cfind --index\n  cfind --status\n\nEnvironment:\n  CFIND_ROOT=/path/to/code                         Required repository directory\n  CFIND_INDEX=/path/to/index.sqlite                Optional exact database path\n  CFIND_LANGUAGES=rust,javascript,typescript,csharp Optional languages (default: all)\n  CFIND_STALE_AFTER_HOURS=6                         Index warn age; rebuild 3x; fetch stale 12x; 0 disables"
+    after_help = "Path regex (-f): Rust regex crate, unanchored, matched against\nrepository-relative paths. No lookaround or backreferences.\n  -f '\\.cs$'              C# files\n  -f '^src/.*\\.rs$'       Rust files under src/\n  -f '\\.(cs|rs)$'         either extension\n  -f '(?i)payment'        case-insensitive, anywhere in the path\n\nEnvironment:\n  CFIND_ROOT=/path/to/code                         Required repository directory\n  CFIND_INDEX=/path/to/index.sqlite                Optional exact database path\n  CFIND_LANGUAGES=rust,javascript,typescript,csharp Optional languages (default: all)\n  CFIND_STALE_AFTER_HOURS=6                         Index warn age; rebuild 3x; 0 disables all three"
 )]
 struct Cli {
     /// Symbol name terms (fuzzy and qualified matching supported).
@@ -31,7 +32,7 @@ struct Cli {
     #[arg(long)]
     from: Option<PathBuf>,
     /// Maximum results.
-    #[arg(short, long, default_value_t = 10)]
+    #[arg(short, long, default_value_t = 7)]
     limit: usize,
     /// Path regex (e.g. '\.cs$' or '\.(cs|rs)$').
     #[arg(short, long, value_name = "REGEX")]
@@ -45,9 +46,32 @@ struct Cli {
     /// Omit repository URLs.
     #[arg(short, long)]
     quiet: bool,
-    /// Collapse matches into high-level containing units.
+    /// Result granularity: one row per repository, per declaring type, or per match.
+    #[arg(short, long, value_enum, default_value_t = CollapseArg::Repo)]
+    collapse: CollapseArg,
+    /// Print each symbol's fully qualified name.
     #[arg(long)]
-    rough: bool,
+    qualified: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum CollapseArg {
+    /// Every match on its own row.
+    None,
+    /// One row per declaring type; members fold into their type.
+    Type,
+    /// One row per repository.
+    Repo,
+}
+
+impl From<CollapseArg> for Collapse {
+    fn from(value: CollapseArg) -> Self {
+        match value {
+            CollapseArg::None => Collapse::None,
+            CollapseArg::Type => Collapse::Type,
+            CollapseArg::Repo => Collapse::Repository,
+        }
+    }
 }
 
 fn main() {
@@ -111,106 +135,104 @@ fn run() -> Result<()> {
         &cli.from
             .unwrap_or(env::current_dir().context("could not determine current directory")?),
     )?;
-    if cli.rough {
-        let results = rough_search_filtered_terms(
-            &connection,
-            &terms,
-            &from,
-            cli.limit,
-            cli.filter.as_deref(),
-            symbol_type.as_deref(),
-            (!config.stale_after.is_zero()).then_some(config.fetch_stale_after()),
-        )?;
-        if results.is_empty() {
-            bail!("no symbols matched '{query_label}' with the selected filters");
-        }
-        for group in results {
-            let result = group.representative;
-            let parent = result
-                .parent
-                .as_deref()
-                .map(|parent| format!(" in {parent}"))
-                .unwrap_or_default();
-            let git_state = result
-                .git_state
-                .as_deref()
-                .map(|state| format!(" {state}"))
-                .unwrap_or_default();
-            println!(
-                "{}  {}{}  {}{}  matches={}",
-                result.kind, result.name, parent, result.match_score, git_state, group.match_count
-            );
-            if let Some(directory) = group.shared_directory {
-                println!("  {}", directory.display());
-            } else {
-                println!("  {}:{}", result.local_path.display(), result.start_line);
-                let url = if cli.quiet {
-                    None
-                } else if cli.commit_url {
-                    result.commit_url.or(result.remote_url)
-                } else {
-                    result.remote_url
-                };
-                if let Some(url) = url {
-                    println!("  {url}");
-                }
-            }
-            if result.qualified_name != result.name {
-                println!("  {}", result.qualified_name);
-            }
-            println!();
-        }
-        return Ok(());
-    }
-    let results = search_filtered_terms(
+    let annotate_git_state = !config.stale_after.is_zero();
+    let output = Output {
+        quiet: cli.quiet,
+        commit_url: cli.commit_url,
+        qualified: cli.qualified,
+        // Only an explicit collapse needs to say how much each row stands for.
+        match_counts: cli.collapse == CollapseArg::Type,
+    };
+    let results = collapsed_search(
         &connection,
         &terms,
-        &from,
-        cli.limit,
-        cli.filter.as_deref(),
-        symbol_type.as_deref(),
-        (!config.stale_after.is_zero()).then_some(config.fetch_stale_after()),
+        SearchOptions {
+            path_filter: cli.filter.as_deref(),
+            symbol_kind: symbol_type.as_deref(),
+            annotate_git_state,
+            collapse: cli.collapse.into(),
+            ..SearchOptions::new(&from, cli.limit)
+        },
     )?;
     if results.is_empty() {
         bail!("no symbols matched '{query_label}' with the selected filters");
     }
     for result in results {
-        let parent = result
-            .parent
-            .as_deref()
-            .map(|parent| format!(" in {parent}"))
-            .unwrap_or_default();
-        let git_state = result
-            .git_state
-            .as_deref()
-            .map(|state| format!(" {state}"))
-            .unwrap_or_default();
-        println!(
-            "{}  {}{}  {}{}\n  {}:{}",
-            result.kind,
-            result.name,
-            parent,
-            result.match_score,
-            git_state,
-            result.local_path.display(),
-            result.start_line
-        );
-        let url = if cli.quiet {
-            None
-        } else if cli.commit_url {
-            result.commit_url.or(result.remote_url)
-        } else {
-            result.remote_url
-        };
-        if let Some(url) = url {
-            println!("  {url}");
-        }
-        if result.qualified_name != result.name {
-            println!("  {}", result.qualified_name);
-        }
-        println!();
+        print_result(&result, &output);
     }
     Ok(())
+}
+
+/// Presentation switches; output is agent-facing, so every line has to earn its tokens.
+struct Output {
+    quiet: bool,
+    commit_url: bool,
+    qualified: bool,
+    match_counts: bool,
+}
+
+fn print_result(result: &CollapsedResult, output: &Output) {
+    let representative = &result.representative;
+    if output.match_counts {
+        println!(
+            "{}  matches={}",
+            result_header(representative),
+            result.match_count
+        );
+    } else {
+        println!("{}", result_header(representative));
+    }
+    println!(
+        "  {}:{}",
+        representative.local_path.display(),
+        representative.start_line
+    );
+    print_url(representative, output);
+    print_result_footer(representative, output);
+}
+
+fn result_header(result: &SearchResult) -> String {
+    let parent = result
+        .parent
+        .as_deref()
+        .map(|parent| format!(" in {parent}"))
+        .unwrap_or_default();
+    let git_state = result
+        .git_state
+        .as_deref()
+        .map(|state| format!("  {state}"))
+        .unwrap_or_default();
+    format!(
+        "{}  {}  {}{}{}",
+        match_tier(result.match_score),
+        result.kind,
+        result.name,
+        parent,
+        git_state
+    )
+}
+
+fn print_url(result: &SearchResult, output: &Output) {
+    let url = if output.quiet {
+        None
+    } else if output.commit_url {
+        result
+            .commit_url
+            .as_deref()
+            .or(result.remote_url.as_deref())
+    } else {
+        result.remote_url.as_deref()
+    };
+    if let Some(url) = url {
+        println!("  {url}");
+    }
+}
+
+fn print_result_footer(result: &SearchResult, output: &Output) {
+    if output.qualified && result.qualified_name != result.name {
+        println!("  {}", result.qualified_name);
+    }
+    println!();
 }
 
 fn run_status(config: &Config) -> Result<()> {

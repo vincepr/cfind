@@ -8,7 +8,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use walkdir::{DirEntry, WalkDir};
+use rayon::prelude::*;
+use walkdir::WalkDir;
 
 use crate::config::SupportedLanguage;
 
@@ -28,12 +29,48 @@ pub struct TrackedFile {
     pub path: String,
 }
 
-fn is_git_metadata(entry: &DirEntry) -> bool {
-    entry.file_name() == OsStr::new(".git")
+/// Build output and dependency directories hold no repositories worth
+/// indexing, and descending into them dominates discovery time.
+const PRUNED_DIRECTORIES: [&str; 4] = ["node_modules", "obj", "bin", "target"];
+
+/// Collects repository roots by spotting `.git` entries; stat-ing every walked
+/// path instead would cost half a million extra syscalls.
+fn repository_roots(root: &Path) -> Result<HashSet<PathBuf>> {
+    let mut roots = HashSet::new();
+    // Sorted traversal makes `.git` arrive before the pruned siblings below it.
+    let mut walk = WalkDir::new(root)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter();
+    while let Some(entry) = walk.next() {
+        let entry = entry
+            .with_context(|| format!("could not inspect repositories under {}", root.display()))?;
+        let is_directory = entry.file_type().is_dir();
+        if entry.file_name() == OsStr::new(".git") {
+            if let Some(parent) = entry.path().parent() {
+                roots.insert(parent.to_path_buf());
+            }
+            if is_directory {
+                walk.skip_current_dir();
+            }
+            continue;
+        }
+        if is_directory
+            && PRUNED_DIRECTORIES.contains(&entry.file_name().to_string_lossy().as_ref())
+            && entry
+                .path()
+                .ancestors()
+                .skip(1)
+                .any(|ancestor| roots.contains(ancestor))
+        {
+            walk.skip_current_dir();
+        }
+    }
+    Ok(roots)
 }
 
 pub fn discover_repositories(root: &Path) -> Result<Vec<Repository>> {
-    let mut roots = HashSet::new();
+    let mut roots = repository_roots(root)?;
 
     if let Ok(top) = git_output(root, &["rev-parse", "--show-toplevel"]) {
         let top = PathBuf::from(top.trim());
@@ -42,21 +79,9 @@ pub fn discover_repositories(root: &Path) -> Result<Vec<Repository>> {
         }
     }
 
-    for entry in WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|entry| !is_git_metadata(entry))
-    {
-        let entry = entry
-            .with_context(|| format!("could not inspect repositories under {}", root.display()))?;
-        let path = entry.path();
-        if path.join(".git").exists() {
-            roots.insert(path.to_path_buf());
-        }
-    }
-
+    // Each repository costs half a dozen git subprocesses; run them concurrently.
     let mut repositories = roots
-        .into_iter()
+        .into_par_iter()
         .filter_map(|repo_root| {
             let revision = match git_output(&repo_root, &["rev-parse", "--verify", "HEAD"]) {
                 Ok(revision) => revision.trim().to_owned(),
@@ -251,12 +276,20 @@ pub fn remote_file_url(
     )
 }
 
+/// Anchors the declaration line only; a range would highlight whole generated
+/// files, whose types span thousands of lines.
 pub fn remote_branch_file_url(
     remote: Option<&str>,
     branch: &str,
     relative_path: &str,
+    start_line: usize,
 ) -> Option<String> {
-    remote_url(remote, branch, relative_path, None)
+    remote_url(
+        remote,
+        branch,
+        relative_path,
+        Some((start_line, start_line)),
+    )
 }
 
 fn remote_url(
@@ -374,6 +407,22 @@ mod tests {
                 8
             ),
             Some("https://github.com/acme/example/blob/abc123/src/a%20file.rs#L3-L8".to_owned())
+        );
+    }
+
+    #[test]
+    fn branch_urls_anchor_the_symbol_lines() {
+        assert_eq!(
+            remote_branch_file_url(
+                Some("https://gitlab.com/acme/example.git"),
+                "main",
+                "src/Common/Migrations/Database27.cs",
+                8
+            ),
+            Some(
+                "https://gitlab.com/acme/example/-/blob/main/src/Common/Migrations/Database27.cs#L8"
+                    .to_owned()
+            )
         );
     }
 

@@ -91,6 +91,59 @@ fn ignores_malformed_git_markers_without_excluding_cache_repositories() {
 }
 
 #[test]
+fn dependency_directories_are_pruned_only_inside_repositories() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    create_repository(&workspace, "src/lib.rs", "pub struct RootSymbol;\n");
+    create_repository(
+        &workspace.join("node_modules/vendored"),
+        "src/lib.rs",
+        "pub struct VendoredSymbol;\n",
+    );
+    create_repository(
+        &temporary.path().join("node_modules/standalone"),
+        "src/lib.rs",
+        "pub struct StandaloneSymbol;\n",
+    );
+
+    let workspace_config = config(&workspace, SupportedLanguage::Rust);
+    let standalone_config = config(
+        &temporary.path().join("node_modules"),
+        SupportedLanguage::Rust,
+    );
+    rebuild(&workspace_config).unwrap();
+    rebuild(&standalone_config).unwrap();
+
+    let database = open_database(&workspace_config.index_path).unwrap();
+    assert_eq!(
+        search(&database, "RootSymbol", &workspace, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        search(&database, "VendoredSymbol", &workspace, 10)
+            .unwrap()
+            .iter()
+            .all(|result| result.name != "VendoredSymbol")
+    );
+
+    // A `node_modules` that is not inside a repository is still searched.
+    let standalone_database = open_database(&standalone_config.index_path).unwrap();
+    assert_eq!(
+        search(
+            &standalone_database,
+            "StandaloneSymbol",
+            temporary.path(),
+            10
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+}
+
+#[test]
 fn reindexes_uncommitted_changes_to_tracked_files() {
     let temporary = TempDir::new().unwrap();
     let workspace = temporary.path().join("workspace");
