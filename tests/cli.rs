@@ -40,6 +40,10 @@ fn help_documents_required_environment_and_path_filters() {
     );
     assert!(stdout.contains("--commit-url"), "{stdout}");
     assert!(stdout.contains("--rough"), "{stdout}");
+    assert!(
+        stdout.contains("List every match instead of the best one per repository"),
+        "{stdout}"
+    );
     assert!(stdout.contains("CFIND_STALE_AFTER_HOURS=6"), "{stdout}");
     assert!(stdout.contains("0 disables"), "{stdout}");
     assert!(stdout.contains("rebuild 3x"), "{stdout}");
@@ -745,6 +749,104 @@ fn qualified_multi_term_queries_rank_the_leaf_and_accept_options_anywhere() {
 }
 
 #[test]
+fn results_outside_the_search_origin_are_not_ordered_by_path_depth() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let index_path = temporary.path().join("indexes/workspace.sqlite");
+    let deep = workspace.join("acme/services/export/jobs");
+    let shallow = workspace.join("zzz");
+    let origin = workspace.join("elsewhere");
+    fs::create_dir_all(&deep).unwrap();
+    fs::create_dir_all(&shallow).unwrap();
+    fs::create_dir_all(&origin).unwrap();
+    for repository in [&deep, &shallow] {
+        run_git(&workspace, &["init", repository.to_str().unwrap()]);
+        fs::write(repository.join("Export.cs"), "public class ExportJob {}\n").unwrap();
+        run_git(repository, &["add", "Export.cs"]);
+    }
+
+    let output = cfind_command(&workspace, &index_path)
+        .args(["ExportJob", "--limit", "2", "--quiet"])
+        .arg("--from")
+        .arg(&origin)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let deep_position = stdout.find(&deep.display().to_string()).unwrap();
+    let shallow_position = stdout.find(&shallow.display().to_string()).unwrap();
+    assert!(deep_position < shallow_position, "{stdout}");
+}
+
+#[test]
+fn type_declarations_win_ties_against_their_members() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let index_path = temporary.path().join("indexes/workspace.sqlite");
+    fs::create_dir_all(workspace.join("src")).unwrap();
+    run_git(temporary.path(), &["init", workspace.to_str().unwrap()]);
+    // The property is declared first, so only the kind tie-break can put the class ahead of it.
+    fs::write(
+        workspace.join("src/Ordering.cs"),
+        "namespace Acme;\npublic class Holder {\n    public string Ordering { get; set; }\n}\npublic class Ordering {}\n",
+    )
+    .unwrap();
+    run_git(&workspace, &["add", "src/Ordering.cs"]);
+
+    let output = cfind_command(&workspace, &index_path)
+        .args(["Ordering", "--all", "--limit", "2", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let class = stdout.find("class  Ordering").unwrap();
+    let property = stdout.find("property  Ordering in Holder").unwrap();
+    assert!(class < property, "{stdout}");
+}
+
+#[test]
+fn short_numeric_terms_still_contribute_to_multi_term_coverage() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let index_path = temporary.path().join("indexes/workspace.sqlite");
+    fs::create_dir_all(workspace.join("src")).unwrap();
+    run_git(temporary.path(), &["init", workspace.to_str().unwrap()]);
+    fs::write(
+        workspace.join("src/Migrations.cs"),
+        "namespace Acme.Migrations;\npublic class Database_16 {}\npublic class LaikaDatabase16 {}\npublic class DatabaseOptions {\n    public string Database { get; set; }\n}\n",
+    )
+    .unwrap();
+    run_git(&workspace, &["add", "src/Migrations.cs"]);
+
+    let output = cfind_command(&workspace, &index_path)
+        .args(["Database", "16", "--all", "--limit", "3", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let database_16 = stdout.find("class  Database_16").unwrap();
+    let laika_database_16 = stdout.find("class  LaikaDatabase16").unwrap();
+    // Matching both terms outranks an exact match on "Database" alone.
+    let exact_property = stdout
+        .find("property  Database in DatabaseOptions")
+        .unwrap_or(usize::MAX);
+    assert!(database_16 < laika_database_16, "{stdout}");
+    assert!(laika_database_16 < exact_property, "{stdout}");
+}
+
+#[test]
 fn namespace_results_are_deduplicated_per_repository_before_limit() {
     let temporary = TempDir::new().unwrap();
     let workspace = temporary.path().join("workspace");
@@ -799,7 +901,7 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
     run_git(&second, &["add", "d.cs"]);
 
     let output = cfind_command(&workspace, &index_path)
-        .args(["Acme", "--type", "namespace", "--limit", "10"])
+        .args(["Acme", "--all", "--type", "namespace", "--limit", "10"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -829,7 +931,14 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
     assert!(!stdout.contains("first/b.cs"), "{stdout}");
 
     let output = cfind_command(&workspace, &index_path)
-        .args(["Acme.Shared", "--type", "namespace", "--limit", "4"])
+        .args([
+            "Acme.Shared",
+            "--all",
+            "--type",
+            "namespace",
+            "--limit",
+            "4",
+        ])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -839,7 +948,14 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
 
     let from = first.join("far");
     let output = cfind_command(&workspace, &index_path)
-        .args(["Acme.Location", "--type", "namespace", "--limit", "1"])
+        .args([
+            "Acme.Location",
+            "--all",
+            "--type",
+            "namespace",
+            "--limit",
+            "1",
+        ])
         .arg("--from")
         .arg(&from)
         .output()
@@ -852,7 +968,7 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
     );
 
     let output = cfind_command(&workspace, &index_path)
-        .args(["Run", "--type", "method"])
+        .args(["Run", "--all", "--type", "method"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -864,7 +980,7 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
     );
 
     let output = cfind_command(&workspace, &index_path)
-        .args(["Duplicate", "--type", "constructor"])
+        .args(["Duplicate", "--all", "--type", "constructor"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -873,6 +989,102 @@ fn namespace_results_are_deduplicated_per_repository_before_limit() {
             .matches("constructor  Duplicate")
             .count(),
         2
+    );
+}
+
+#[test]
+fn searches_return_one_result_per_repository_until_all_is_requested() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let index_path = temporary.path().join("indexes/workspace.sqlite");
+    for (name, source) in [
+        (
+            "alpha",
+            "namespace Acme.Alpha;\npublic class PaymentService {\n    public PaymentService() {}\n    public void ProcessPayment() {}\n}\n",
+        ),
+        (
+            "beta",
+            "namespace Acme.Beta;\npublic class PaymentGateway {}\n",
+        ),
+        (
+            "gamma",
+            "namespace Acme.Gamma;\npublic class PaymentQueue {}\n",
+        ),
+    ] {
+        let repository = workspace.join(name);
+        fs::create_dir_all(&repository).unwrap();
+        run_git(&workspace, &["init", repository.to_str().unwrap()]);
+        fs::write(repository.join("Payments.cs"), source).unwrap();
+        run_git(&repository, &["add", "Payments.cs"]);
+    }
+
+    let output = cfind_command(&workspace, &index_path)
+        .args(["Payment", "--limit", "10", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for name in ["alpha", "beta", "gamma"] {
+        assert_eq!(
+            stdout
+                .matches(&format!("{}/{name}/Payments.cs:", workspace.display()))
+                .count(),
+            1,
+            "{stdout}"
+        );
+    }
+    assert!(stdout.contains("class  PaymentService  "), "{stdout}");
+    assert!(!stdout.contains("constructor  "), "{stdout}");
+    assert!(stdout.contains("matches=3"), "{stdout}");
+    assert_eq!(stdout.matches("matches=1").count(), 2, "{stdout}");
+
+    let limited = cfind_command(&workspace, &index_path)
+        .args(["Payment", "--limit", "2", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(limited.status.success());
+    let limited_stdout = String::from_utf8_lossy(&limited.stdout);
+    assert_eq!(
+        limited_stdout.matches("matches=").count(),
+        2,
+        "{limited_stdout}"
+    );
+
+    let detailed = cfind_command(&workspace, &index_path)
+        .args(["Payment", "--all", "--limit", "10", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(detailed.status.success());
+    let detailed_stdout = String::from_utf8_lossy(&detailed.stdout);
+    assert_eq!(
+        detailed_stdout
+            .matches(&format!(
+                "{}:",
+                workspace.join("alpha/Payments.cs").display()
+            ))
+            .count(),
+        3,
+        "{detailed_stdout}"
+    );
+    assert!(
+        detailed_stdout.contains("constructor  PaymentService"),
+        "{detailed_stdout}"
+    );
+    assert!(!detailed_stdout.contains("matches="), "{detailed_stdout}");
+
+    let conflict = cfind_command(&workspace, &index_path)
+        .args(["Payment", "--all", "--rough"])
+        .output()
+        .unwrap();
+    assert_eq!(conflict.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&conflict.stderr).contains("cannot be used with"),
+        "{}",
+        String::from_utf8_lossy(&conflict.stderr)
     );
 }
 
@@ -948,7 +1160,7 @@ fn rough_search_collapses_types_and_members_before_applying_the_limit() {
     run_git(&workspace, &["add", "src/Payments.cs"]);
 
     let detailed = cfind_command(&workspace, &index_path)
-        .args(["Payment", "--limit", "10", "--quiet"])
+        .args(["Payment", "--all", "--limit", "10", "--quiet"])
         .output()
         .unwrap();
     assert!(detailed.status.success());

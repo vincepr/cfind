@@ -22,7 +22,8 @@ struct RankedResult {
     covered_terms: usize,
     exact_short_terms: usize,
     similarity: u32,
-    path_distance: usize,
+    is_test: bool,
+    proximity: (usize, usize),
 }
 
 pub fn search(
@@ -96,6 +97,47 @@ pub fn search_filtered_terms(
             break;
         }
     }
+    Ok(results)
+}
+
+/// Keeps the best-ranked match per repository so one query surfaces several repositories.
+pub fn repository_search_filtered_terms(
+    connection: &Connection,
+    query_parts: &[String],
+    from: &Path,
+    limit: usize,
+    path_filter: Option<&str>,
+    symbol_kind: Option<&str>,
+    stale_after: Option<Duration>,
+) -> Result<Vec<RoughSearchResult>> {
+    let terms = query_terms(query_parts)?;
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let ranked = ranked_filtered_terms(
+        connection,
+        &terms,
+        from,
+        path_filter,
+        symbol_kind,
+        stale_after,
+    )?;
+    let mut repositories: HashMap<String, usize> = HashMap::new();
+    let mut results: Vec<RoughSearchResult> = Vec::new();
+    for item in ranked {
+        // Count matches beyond the limit too, so the reported size hint stays complete.
+        if let Some(index) = repositories.get(&item.repository_root).copied() {
+            results[index].match_count += 1;
+            continue;
+        }
+        repositories.insert(item.repository_root, results.len());
+        results.push(RoughSearchResult {
+            representative: item.result,
+            match_count: 1,
+            shared_directory: None,
+        });
+    }
+    results.truncate(limit);
     Ok(results)
 }
 
@@ -447,7 +489,7 @@ fn ranked_filtered_terms(
         let similarity = (total_similarity / terms.len() as u64) as u32;
         let local_path = Path::new(&root).join(&relative_path);
         ranked.push(RankedResult {
-            path_distance: path_distance(from, &local_path),
+            proximity: proximity(from, &local_path),
             result: SearchResult {
                 name,
                 qualified_name,
@@ -484,6 +526,7 @@ fn ranked_filtered_terms(
             covered_terms,
             exact_short_terms,
             similarity,
+            is_test: is_test_path(&relative_path),
         });
     }
     ranked.sort_by(compare_ranked);
@@ -538,9 +581,39 @@ fn compare_ranked(left: &RankedResult, right: &RankedResult) -> Ordering {
         .then_with(|| right.covered_terms.cmp(&left.covered_terms))
         .then_with(|| right.exact_short_terms.cmp(&left.exact_short_terms))
         .then_with(|| right.similarity.cmp(&left.similarity))
-        .then_with(|| left.path_distance.cmp(&right.path_distance))
+        .then_with(|| kind_rank(&left.result.kind).cmp(&kind_rank(&right.result.kind)))
+        .then_with(|| left.is_test.cmp(&right.is_test))
+        .then_with(|| right.proximity.0.cmp(&left.proximity.0))
+        .then_with(|| left.proximity.1.cmp(&right.proximity.1))
         .then_with(|| left.result.local_path.cmp(&right.result.local_path))
         .then_with(|| left.result.start_line.cmp(&right.result.start_line))
+}
+
+/// Production code wins ties against its tests. Matches a `test`/`tests` directory or a file stem
+/// ending in `test`, `tests`, or `spec`, which covers the C#, Rust, and TypeScript conventions.
+fn is_test_path(relative_path: &str) -> bool {
+    let (directories, file) = relative_path
+        .rsplit_once('/')
+        .unwrap_or(("", relative_path));
+    let stem = file
+        .rsplit_once('.')
+        .map_or(file, |(stem, _)| stem)
+        .to_ascii_lowercase();
+    stem.ends_with("test")
+        || stem.ends_with("tests")
+        || stem.ends_with("spec")
+        || directories.split('/').any(|directory| {
+            directory.eq_ignore_ascii_case("test") || directory.eq_ignore_ascii_case("tests")
+        })
+}
+
+/// Equally scored declarations answer "where does this live" best from the outside in.
+fn kind_rank(kind: &str) -> u8 {
+    match kind {
+        "namespace" => 0,
+        "class" | "struct" | "interface" | "enum" | "record" | "trait" | "type" | "delegate" => 1,
+        _ => 2,
+    }
 }
 
 #[cfg(test)]
@@ -563,35 +636,38 @@ fn canonical_similarity(query: &CanonicalName, candidate: &CanonicalName) -> u32
     if candidate_chars.starts_with(query_chars) {
         return 9_000 + length_closeness(query_chars.len(), candidate_chars.len(), 900);
     }
-    if query_chars.len() >= 3
-        && let Some(position) = find_subslice(candidate_chars, query_chars)
+    // Two-character terms only match at a word boundary; shorter ones would match nearly anything.
+    if query_chars.len() >= 2
+        && candidate
+            .boundaries
+            .iter()
+            .any(|&position| candidate_chars[position..].starts_with(query_chars.as_slice()))
     {
-        let closeness = length_closeness(query_chars.len(), candidate_chars.len(), 900);
-        return if candidate.boundaries.contains(&position) {
-            8_000 + closeness
-        } else {
-            7_000 + closeness
-        };
+        return 8_000 + length_closeness(query_chars.len(), candidate_chars.len(), 900);
     }
-    if query_chars.len() >= 3
-        && ordered_boundary_subsequence(query_chars, candidate_chars, &candidate.boundaries)
-    {
-        return 6_000 + length_closeness(query_chars.len(), candidate_chars.len(), 500);
+    if query_chars.len() >= 3 && find_subslice(candidate_chars, query_chars).is_some() {
+        return 7_000 + length_closeness(query_chars.len(), candidate_chars.len(), 900);
+    }
+    if query_chars.len() >= 3 && is_subsequence(query_chars, candidate_chars) {
+        // Alignment alone saturates on names with many word boundaries, so average it with how
+        // much of the candidate the query covers: a tight match in a short name wins.
+        let alignment = subsequence_quality(query_chars, candidate_chars, &candidate.boundaries);
+        let coverage = length_closeness(query_chars.len(), candidate_chars.len(), 999);
+        return 6_000 + (alignment + coverage) / 2;
     }
 
-    let typo_limit = match query_chars.len() {
-        0..=3 => 0,
-        4..=7 => 1,
-        _ => 2,
-    };
-    if typo_limit == 0 || query_chars.len().abs_diff(candidate_chars.len()) > typo_limit {
+    // A typo match keeps the query intact except for up to two edits, so it stays below any
+    // subsequence match; the score grows with how much of a long name the edits leave untouched.
+    const TYPO_LIMIT: usize = 2;
+    if query_chars.len() < 4 || query_chars.len().abs_diff(candidate_chars.len()) > TYPO_LIMIT {
         return 0;
     }
     let distance = osa_distance(&query.text, &candidate.text);
-    if distance > typo_limit {
+    if distance == 0 || distance > TYPO_LIMIT {
         return 0;
     }
-    5_000 + ((typo_limit - distance) as u32 * 250)
+    let longest = query_chars.len().max(candidate_chars.len()) as u32;
+    5_000 + (999 * (longest - distance as u32)) / longest
 }
 
 struct CanonicalName {
@@ -642,24 +718,79 @@ fn find_subslice(candidate: &[char], query: &[char]) -> Option<usize> {
         .position(|window| window == query)
 }
 
-fn ordered_boundary_subsequence(query: &[char], candidate: &[char], boundaries: &[usize]) -> bool {
-    let mut best = vec![None; query.len() + 1];
-    best[0] = Some(0);
-    for (position, candidate_character) in candidate.iter().enumerate() {
-        let boundary_score = usize::from(boundaries.contains(&position));
-        for query_position in (0..query.len()).rev() {
-            if candidate_character == &query[query_position]
-                && let Some(score) = best[query_position]
-            {
-                best[query_position + 1] =
-                    best[query_position + 1].max(Some(score + boundary_score));
-            }
+/// Cheap allocation-free guard so only real subsequence matches pay for the alignment scoring.
+fn is_subsequence(query: &[char], candidate: &[char]) -> bool {
+    let mut remaining = query.iter();
+    let mut wanted = remaining.next();
+    for character in candidate {
+        if wanted == Some(character) {
+            wanted = remaining.next();
         }
     }
-    best[query.len()].unwrap_or(0) >= 2
+    wanted.is_none()
 }
 
-fn path_distance(from: &Path, target: &Path) -> usize {
+/// Alignment quality from 1 to 999 for a subsequence match: word-boundary hits earn a bonus and
+/// gaps cost, so a tight, well-aligned match such as `artcl` in `Article` outranks a scattered one.
+fn subsequence_quality(query: &[char], candidate: &[char], boundaries: &[usize]) -> u32 {
+    const MATCH: i32 = 16;
+    const GAP: i32 = 4;
+    const START_BONUS: i32 = 22;
+    const BOUNDARY_BONUS: i32 = 10;
+    const UNMATCHED: i32 = i32::MIN / 4;
+    const MAX_TAIL_PENALTY: usize = 12;
+
+    let bonus = |position: usize| match position {
+        0 => START_BONUS,
+        _ if boundaries.binary_search(&position).is_ok() => BOUNDARY_BONUS,
+        _ => 0,
+    };
+    // best[i] is the score of the best alignment ending with the current query character at i.
+    let mut best = candidate
+        .iter()
+        .enumerate()
+        .map(|(position, character)| {
+            if character == &query[0] {
+                MATCH + bonus(position)
+            } else {
+                UNMATCHED
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut next = vec![UNMATCHED; candidate.len()];
+    for query_character in &query[1..] {
+        next.fill(UNMATCHED);
+        // Carries the best earlier alignment, gap-adjusted so distant predecessors cost more.
+        let mut carried = UNMATCHED;
+        for position in 0..candidate.len() {
+            if position > 0 && best[position - 1] > UNMATCHED {
+                carried = carried.max(best[position - 1] + GAP * (position as i32 - 1));
+            }
+            if &candidate[position] == query_character && carried > UNMATCHED {
+                next[position] = MATCH + bonus(position) + carried - GAP * (position as i32 - 1);
+            }
+        }
+        std::mem::swap(&mut best, &mut next);
+    }
+    let mut score = UNMATCHED;
+    let mut end = None;
+    for (position, &candidate_score) in best.iter().enumerate() {
+        if candidate_score > score {
+            score = candidate_score;
+            end = Some(position);
+        }
+    }
+    let Some(end) = end else { return 1 };
+    let tail = (candidate.len() - 1 - end).min(MAX_TAIL_PENALTY) as i32;
+    let ideal = MATCH * query.len() as i32 + START_BONUS;
+    (999 * (score - tail).max(1) / ideal).clamp(1, 999) as u32
+}
+
+/// Vicinity of a result to the search origin, best first: how many leading path components the two
+/// share, then - only for results inside the origin's own subtree - how far below it they sit.
+/// Results outside that subtree compare equal, so an unrelated repository is never preferred just
+/// for sitting at a shallower path than another.
+fn proximity(from: &Path, target: &Path) -> (usize, usize) {
     let from = if from.is_file() {
         from.parent().unwrap_or(from)
     } else {
@@ -668,12 +799,17 @@ fn path_distance(from: &Path, target: &Path) -> usize {
     let target = target.parent().unwrap_or(target);
     let from_components = from.components().collect::<Vec<_>>();
     let target_components = target.components().collect::<Vec<_>>();
-    let common = from_components
+    let shared = from_components
         .iter()
         .zip(&target_components)
         .take_while(|(left, right)| left == right)
         .count();
-    from_components.len() + target_components.len() - (2 * common)
+    let depth_below = if shared == from_components.len() {
+        target_components.len() - shared
+    } else {
+        0
+    };
+    (shared, depth_below)
 }
 
 pub fn query_terms(query_parts: &[String]) -> Result<Vec<String>> {
@@ -702,12 +838,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn path_distance_prefers_nearby_directories() {
+    fn proximity_prefers_nearby_directories_without_penalizing_deep_unrelated_ones() {
         let from = Path::new("/code/shop/api");
-        assert!(
-            path_distance(from, Path::new("/code/shop/api/db/context.cs"))
-                < path_distance(from, Path::new("/code/other/db/context.cs"))
-        );
+        let inside = proximity(from, Path::new("/code/shop/api/db/context.cs"));
+        let nearer = proximity(from, Path::new("/code/shop/api/context.cs"));
+        let outside = proximity(from, Path::new("/code/other/db/context.cs"));
+        let deeply_outside = proximity(from, Path::new("/code/other/a/b/c/d/context.cs"));
+
+        assert_eq!(nearer.0, inside.0);
+        assert!(nearer.1 < inside.1, "closer inside the origin wins");
+        assert!(inside.0 > outside.0, "sharing more of the origin wins");
+        // Unrelated results compare equal, so later tie-breakers decide instead of path depth.
+        assert_eq!(outside, deeply_outside);
     }
 
     #[test]
@@ -730,6 +872,58 @@ mod tests {
         assert!(boundary_substring > ordinary_substring);
         assert!(ordinary_substring > abbreviation);
         assert!(abbreviation > typo);
+    }
+
+    #[test]
+    fn test_paths_are_recognized_without_flagging_similar_names() {
+        assert!(is_test_path("tests/OrderApi.Tests/OrderDownloaderTests.cs"));
+        assert!(is_test_path("src/Common/PriceUploaderTest.cs"));
+        assert!(is_test_path("src/search/index_test.rs"));
+        assert!(is_test_path("src/app/order.spec.ts"));
+        assert!(!is_test_path("src/Common/LatestPrices.cs"));
+        assert!(!is_test_path("src/Common/TestContainerFactory.cs"));
+    }
+
+    #[test]
+    fn subsequence_matches_rank_by_alignment_quality() {
+        // Every subsequence matches, but a tight one must beat a scattered one across a long name.
+        let tight = name_similarity("artcl", "Article");
+        let scattered = name_similarity("artcl", "AddReturnClient");
+        assert!((6_000..7_000).contains(&tight));
+        assert!((6_000..7_000).contains(&scattered));
+        assert!(tight > scattered, "{tight} vs {scattered}");
+
+        let context = name_similarity("Cntxt", "Context");
+        let nested_context = name_similarity("Cntxt", "DataContextTests");
+        assert!(context > nested_context, "{context} vs {nested_context}");
+        assert!(name_similarity("psej", "PriceStockExportJob") > 6_000);
+    }
+
+    #[test]
+    fn typo_matching_allows_two_edits_from_four_characters() {
+        // "Artikel" is not a subsequence of "Article"; it is a substitution plus a transposition.
+        let typo = name_similarity("Artikel", "Article");
+        assert!((5_000..6_000).contains(&typo), "{typo}");
+        assert_eq!(name_similarity("Cot", "Cat"), 0);
+        assert_eq!(name_similarity("Artikel", "Warehouse"), 0);
+    }
+
+    #[test]
+    fn two_character_terms_match_only_at_word_boundaries() {
+        assert!((8_000..9_000).contains(&name_similarity("16", "Database_16")));
+        assert!((8_000..9_000).contains(&name_similarity("16", "LaikaDatabase16")));
+        assert!(name_similarity("16", "Database_16") > name_similarity("16", "LaikaDatabase16"));
+        assert_eq!(name_similarity("16", "Database19"), 0);
+        assert_eq!(name_similarity("as", "DatabaseContext"), 0);
+        assert_eq!(name_similarity("se", "Database"), 0);
+    }
+
+    #[test]
+    fn a_boundary_occurrence_outranks_an_earlier_ordinary_one() {
+        // "cat" appears at index 1 and again at the "Catalog" boundary.
+        assert!((8_000..9_000).contains(&name_similarity("cat", "ScatterCatalog")));
+        assert!((7_000..8_000).contains(&name_similarity("cat", "Scatter")));
+        assert!((8_000..9_000).contains(&name_similarity("Payment", "ProcessPaymentJob")));
     }
 
     #[test]

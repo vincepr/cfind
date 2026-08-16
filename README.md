@@ -74,6 +74,7 @@ cfind GzipDecompress -f '\.cs$'
 cfind Config -f '^src/.*\.rs$'
 cfind --type
 cfind DatabaseContext --type class
+cfind DatabaseContext --all
 cfind Database --rough
 cfind DatabaseContext --commit-url
 cfind DatabaseContext --quiet
@@ -96,14 +97,21 @@ Searches return at most 10 results by default; use `--limit` to change that.
 Pass `--quiet` to omit repository URLs from results, including when
 `--commit-url` is also present.
 
-Pass `--rough` for an overview instead of the default symbol-by-symbol result
+By default a search returns the best-ranked match per repository, so a limit of
+10 can surface up to 10 different repositories instead of 10 symbols from the
+same one. Each row ends with a `matches=N` hint counting every match in that
+repository, including matches beyond `--limit`. Pass `--all` for the detailed
+symbol-by-symbol list, where several matches from one repository are kept and
+no `matches=N` hint is printed. `--all` cannot be combined with `--rough`.
+
+Pass `--rough` for an overview instead of the per-repository result
 list. Rough results are grouped before `--limit` is applied. A matching
 namespace is shown once at the common directory containing its matching
 symbols; matches within the same enclosing type are shown once at the type
 declaration. Each row includes a `matches=N` size hint. Group rank is based on
 the best matching symbol, and all existing path, kind, URL, origin, and limit
-options remain composable with the mode. Without `--rough`, output and ranking
-retain their precise symbol-level behavior.
+options remain composable with the mode. Ranking itself always stays
+symbol-level; only the grouping of the printed rows differs between modes.
 
 Use `--type class` (or another indexed kind) to restrict symbol kinds. Run
 `cfind --type` without a query or value to list every distinct kind in the
@@ -135,18 +143,33 @@ format version, and creation time. A configuration or version mismatch
 automatically triggers a fresh rebuild before searching.
 
 Search ranking uses explicit match tiers: exact name, prefix, word-boundary
-substring, ordinary substring, boundary-aware ordered abbreviation, and a
-bounded typo match using optimal string alignment distance. This rejects broad
-similarity coincidences while retaining nearby transpositions, substitutions,
-and omissions. Each result includes a compact match score from `0` to `10000`;
-exact names score `10000`. Complete multi-term coverage, exact short-name
-matches, and score are compared before directory proximity. If otherwise equal,
-the result with the shortest directory distance from `--from` (the current
-directory by default) appears first; paths and source lines provide deterministic
-final tie-breakers.
+substring, ordinary substring, ordered subsequence, and a typo match using
+optimal string alignment distance. Matching is deliberately loose and lets
+ranking sort it out:
 
-Repeated declarations of the same normalized namespace within one repository
-are collapsed after ranking and before `--limit` is applied. The best or nearest
+- Two-character terms such as `16` match only at a word boundary, so
+  `cfind Database 16` counts the numeric term as covered by `Database_16`
+  without matching it anywhere else.
+- Any ordered subsequence of three or more characters matches, scored by
+  alignment quality and length coverage: word-boundary hits earn a bonus, gaps
+  cost, and a tight match in a short name beats a scattered one in a long name,
+  so `artcl` ranks `Article` above `AddReturnClient` and `DbCtx` finds
+  `DbContext`.
+- Terms of four or more characters tolerate up to two edits, scored by how much
+  of the name the edits leave untouched, so `Artikel` still finds `Article`.
+
+Each result includes a compact match score from `0` to `10000`; exact names
+score `10000`. Complete multi-term coverage, exact short-name matches, and score
+are compared first. Equal scores prefer the outermost declaration - a namespace,
+then a type, then a member - so a class outranks a like-named property, and
+production code ahead of its tests. Next comes vicinity to `--from` (the current
+directory by default): results sharing more of its path rank higher, and within
+its own subtree the closest one wins. Results outside that subtree are equally
+distant, so an unrelated repository is never preferred merely for sitting at a
+shallower path. Paths and source lines provide deterministic final tie-breakers.
+
+With `--all`, repeated declarations of the same normalized namespace within one
+repository are collapsed after ranking and before `--limit` is applied. The best or nearest
 declaration is retained. Identically named namespaces in separate repositories
 and all non-namespace symbols remain separate results.
 
